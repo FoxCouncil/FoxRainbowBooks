@@ -48,6 +48,9 @@ coverage*.json
 ## AccurateRip response files (manual test artifacts)
 dBAR-*.bin
 
+## Pack output
+artifacts/
+
 ## OS
 .DS_Store
 Thumbs.db
