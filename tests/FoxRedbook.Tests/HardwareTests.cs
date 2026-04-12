@@ -80,16 +80,11 @@ public sealed class HardwareTests
     {
         using var drive = TryOpenOrSkip();
 
-        TableOfContents toc = await drive.ReadTocAsync().ConfigureAwait(false);
-
-        Skip.IfNot(toc.TrackCount > 0, "No tracks in TOC — is an audio CD inserted?");
+        TableOfContents toc = await TryReadTocOrSkip(drive).ConfigureAwait(false);
 
         Assert.InRange(toc.FirstTrackNumber, 1, 99);
         Assert.InRange(toc.LastTrackNumber, toc.FirstTrackNumber, 99);
         Assert.True(toc.LeadOutLba > 0, "Lead-out LBA must be positive.");
-
-        bool hasAudio = toc.Tracks.Any(t => t.Type == TrackType.Audio);
-        Skip.IfNot(hasAudio, "No audio tracks in TOC — insert an audio CD.");
 
         foreach (var track in toc.Tracks.Where(t => t.Type == TrackType.Audio))
         {
@@ -114,19 +109,15 @@ public sealed class HardwareTests
     {
         using var drive = TryOpenOrSkip();
 
-        var toc = await drive.ReadTocAsync().ConfigureAwait(false);
-        Skip.IfNot(toc.TrackCount > 0, "No tracks in TOC.");
+        var toc = await TryReadTocOrSkip(drive).ConfigureAwait(false);
 
-        TrackInfo? firstAudioTrack = toc.Tracks
-            .Cast<TrackInfo?>()
-            .FirstOrDefault(t => t!.Value.Type == TrackType.Audio);
-        Skip.IfNot(firstAudioTrack.HasValue, "No audio tracks — insert an audio CD.");
+        var firstAudioTrack = toc.Tracks.First(t => t.Type == TrackType.Audio);
 
         // Read well past the 2-second pregap (150 sectors) where data is
         // typically digital silence. 1000 sectors in (~13 seconds) should
         // have actual audio on any music CD.
-        long readLba = firstAudioTrack!.Value.StartLba
-            + Math.Min(1000, firstAudioTrack.Value.SectorCount / 2);
+        long readLba = firstAudioTrack.StartLba
+            + Math.Min(1000, firstAudioTrack.SectorCount / 2);
         byte[] buffer = new byte[CdConstants.SectorSize];
 
         // Fill with a sentinel so we can distinguish "buffer never written"
@@ -146,8 +137,8 @@ public sealed class HardwareTests
 
         DriveInquiry inq = drive.Inquiry;
         string diag = $"Drive: {inq.Vendor} / {inq.Product} / {inq.Revision}, "
-            + $"LBA: {readLba}, Track {firstAudioTrack.Value.Number} "
-            + $"(starts {firstAudioTrack.Value.StartLba}, {firstAudioTrack.Value.SectorCount} sectors), "
+            + $"LBA: {readLba}, Track {firstAudioTrack.Number} "
+            + $"(starts {firstAudioTrack.StartLba}, {firstAudioTrack.SectorCount} sectors), "
             + $"LeadOut: {toc.LeadOutLba}, "
             + $"Buffer: {(allSentinel ? "UNTOUCHED (0xCC)" : allZero ? "ALL ZEROS" : "HAS DATA")}, "
             + $"Distinct: {buffer.Distinct().Count()}, "
@@ -198,5 +189,36 @@ public sealed class HardwareTests
             Skip.If(true, $"Could not open '{devicePath}': {ex.Message}");
             throw; // unreachable — Skip.If(true, ...) throws SkipException
         }
+    }
+
+    /// <summary>
+    /// Reads the TOC, skipping if no disc is present or the drive can't
+    /// read it. Also skips if the TOC has no audio tracks.
+    /// </summary>
+    internal static async Task<TableOfContents> TryReadTocOrSkip(IOpticalDrive drive)
+    {
+        TableOfContents toc;
+
+        try
+        {
+            toc = await drive.ReadTocAsync().ConfigureAwait(false);
+        }
+        catch (MediaNotPresentException)
+        {
+            Skip.If(true, "No disc in drive.");
+            throw; // unreachable
+        }
+        catch (OpticalDriveException ex)
+        {
+            Skip.If(true, $"Could not read TOC: {ex.Message}");
+            throw; // unreachable
+        }
+
+        Skip.IfNot(toc.TrackCount > 0, "No tracks in TOC — is an audio CD inserted?");
+
+        bool hasAudio = toc.Tracks.Any(t => t.Type == TrackType.Audio);
+        Skip.IfNot(hasAudio, "No audio tracks in TOC — insert an audio CD.");
+
+        return toc;
     }
 }

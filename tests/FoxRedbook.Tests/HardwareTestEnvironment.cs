@@ -4,65 +4,23 @@ namespace FoxRedbook.Tests;
 
 /// <summary>
 /// Shared helper for the hardware test suite. Resolves the optical-drive
-/// device path from the <c>FOXREDBOOK_TEST_DEVICE</c> environment variable
-/// first, then falls back to a platform-appropriate default. Exists so
-/// tests don't each hand-roll env-var parsing and so the default device
-/// path is documented in exactly one place.
+/// device path by scanning the system for CD-ROM hardware, with an
+/// environment variable override for non-standard configurations.
 /// </summary>
 internal static class HardwareTestEnvironment
 {
     public const string EnvironmentVariableName = "FOXREDBOOK_TEST_DEVICE";
 
     /// <summary>
-    /// Platform default device path. Linux drives usually live at
-    /// <c>/dev/sr0</c>, Windows exposes the first optical drive as
-    /// <c>D:</c>, and macOS uses BSD names like <c>disk1</c>.
-    /// </summary>
-    public static string DefaultDevicePath
-    {
-        get
-        {
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
-            {
-                return "/dev/sr0";
-            }
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                return "D:";
-            }
-
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-            {
-                return "disk1";
-            }
-
-            // Unknown OS — there is no sensible default. Callers will
-            // skip their tests when GetDevicePath returns null.
-            return string.Empty;
-        }
-    }
-
-    /// <summary>
     /// Returns the device path to use for hardware tests, or
-    /// <see langword="null"/> if no drive is available on this host.
+    /// <see langword="null"/> if no optical drive is found on this host.
     /// </summary>
     /// <remarks>
-    /// <para>
     /// Resolution order:
     /// <list type="number">
     ///   <item><c>FOXREDBOOK_TEST_DEVICE</c> environment variable (if set and non-empty)</item>
-    ///   <item>Platform default (<see cref="DefaultDevicePath"/>) if it appears to exist</item>
+    ///   <item>Auto-detect: scan the system for optical drives and return the first one found</item>
     /// </list>
-    /// </para>
-    /// <para>
-    /// Existence checks: on Linux and macOS we check whether the device
-    /// file exists on disk. On Windows, drive-letter existence is harder
-    /// to check without side effects, so we return the default and let
-    /// the test's <c>OpticalDrive.Open</c> call fail — the test then
-    /// catches and skips. Env var values are always returned as-is
-    /// without probing, trusting the user who set them.
-    /// </para>
     /// </remarks>
     public static string? GetDevicePath()
     {
@@ -73,25 +31,117 @@ internal static class HardwareTestEnvironment
             return fromEnv.Trim();
         }
 
-        string defaultPath = DefaultDevicePath;
+        return DetectDrive();
+    }
 
-        if (string.IsNullOrEmpty(defaultPath))
+    private static string? DetectDrive()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return null;
+            return DetectWindowsDrive();
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
         {
-            return File.Exists(defaultPath) ? defaultPath : null;
+            return DetectLinuxDrive();
         }
 
         if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
         {
-            // BSD name like "disk1" — check the corresponding /dev/ path.
-            return File.Exists("/dev/" + defaultPath) ? defaultPath : null;
+            return DetectMacDrive();
         }
 
-        // Windows: return the default and let the Open call fail-and-skip.
-        return defaultPath;
+        return null;
+    }
+
+    private static string? DetectWindowsDrive()
+    {
+        // Enumerate all CD-ROM drives. Prefer one with media ready —
+        // and specifically one with an audio CD — over an empty drive.
+        try
+        {
+            string? firstEmpty = null;
+
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (drive.DriveType != DriveType.CDRom)
+                {
+                    continue;
+                }
+
+                string path = drive.Name.TrimEnd('\\');
+
+                if (!drive.IsReady)
+                {
+                    firstEmpty ??= path;
+                    continue;
+                }
+
+                // Drive has media. Try to open it and check for audio tracks.
+                try
+                {
+                    using var optical = OpticalDrive.Open(path);
+                    var toc = optical.ReadTocAsync().GetAwaiter().GetResult();
+
+                    if (toc.Tracks.Any(t => t.Type == TrackType.Audio))
+                    {
+                        return path;
+                    }
+                }
+                catch (OpticalDriveException)
+                {
+                    // Drive is ready but we can't read the TOC (data-only
+                    // disc, permissions, etc.). Still better than an empty
+                    // drive — fall through and prefer it over firstEmpty.
+                    firstEmpty ??= path;
+                }
+            }
+
+            return firstEmpty;
+        }
+        catch (IOException)
+        {
+            // DriveInfo can throw on restricted environments.
+        }
+        catch (UnauthorizedAccessException)
+        {
+            // Locked-down hosts may deny drive enumeration.
+        }
+
+        return null;
+    }
+
+    private static string? DetectLinuxDrive()
+    {
+        // Linux optical drives are /dev/sr0, /dev/sr1, etc.
+        for (int i = 0; i < 8; i++)
+        {
+            string path = $"/dev/sr{i}";
+
+            if (File.Exists(path))
+            {
+                return path;
+            }
+        }
+
+        return null;
+    }
+
+    private static string? DetectMacDrive()
+    {
+        // macOS optical drives appear as /dev/diskN. Scan for any that
+        // exist beyond the typical system disk (disk0). In practice,
+        // external USB optical drives get disk1, disk2, etc.
+        for (int i = 1; i < 10; i++)
+        {
+            string bsdName = $"disk{i}";
+
+            if (File.Exists($"/dev/{bsdName}"))
+            {
+                return bsdName;
+            }
+        }
+
+        return null;
     }
 }
