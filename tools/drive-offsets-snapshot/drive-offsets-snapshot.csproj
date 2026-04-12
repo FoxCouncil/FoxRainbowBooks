@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+    <!--
+      This is a one-off CLI tool, not a shipping library. Suppress analyzer
+      rules that don't add value for a short-lived console app.
+    -->
+    <NoWarn>CA1031;CA1303;CA1806;CA1849;CA2234</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\FoxRedbook\FoxRedbook.csproj" />
+  </ItemGroup>
+
+</Project>

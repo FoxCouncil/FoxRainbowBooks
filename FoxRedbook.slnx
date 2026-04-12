@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FoxRedbook/FoxRedbook.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FoxRedbook.Tests/FoxRedbook.Tests.csproj" />
+  </Folder>
+</Solution>

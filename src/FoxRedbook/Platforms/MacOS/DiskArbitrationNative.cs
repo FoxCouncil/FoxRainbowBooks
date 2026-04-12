@@ -1,0 +1,156 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+
+namespace FoxRedbook.Platforms.MacOS;
+
+/// <summary>
+/// DiskArbitration and CoreFoundation interop for unmounting an optical
+/// disc before claiming exclusive SCSI access, and for the run-loop
+/// helpers needed to block on DA callback completion.
+/// </summary>
+/// <remarks>
+/// <para>
+/// macOS auto-mounts audio CDs as a virtual filesystem through AudioCD.kext.
+/// To issue raw SCSI commands via IOKit we must first unmount the disc via
+/// DiskArbitration; otherwise <c>ObtainExclusiveAccess</c> fails with
+/// <c>kIOReturnBusy</c>. The unmount is non-destructive — only the
+/// filesystem layer detaches; the disc remains physically in the drive.
+/// On Dispose we remount via <c>DADiskMount</c> so the user gets their
+/// AIFF virtual file view back.
+/// </para>
+/// <para>
+/// DiskArbitration callbacks dispatch through a CFRunLoop, which means we
+/// schedule the session on the current thread's run loop and block briefly
+/// with <c>CFRunLoopRunInMode</c> until the callback fires. Step 11's
+/// watcher will need a dedicated background run-loop thread for persistent
+/// hot-plug events; for step 8's synchronous lifecycle, inline blocking
+/// matches the Linux and Windows backend semantics.
+/// </para>
+/// </remarks>
+[SupportedOSPlatform("macos")]
+internal static partial class DiskArbitrationNative
+{
+    private const string DiskArbitrationFramework =
+        "/System/Library/Frameworks/DiskArbitration.framework/DiskArbitration";
+
+    private const string CoreFoundationFramework =
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
+
+    /// <summary><c>kDADiskUnmountOptionDefault</c> = 0.</summary>
+    internal const uint kDADiskUnmountOptionDefault = 0;
+
+    /// <summary><c>kDADiskMountOptionDefault</c> = 0.</summary>
+    internal const uint kDADiskMountOptionDefault = 0;
+
+    /// <summary>
+    /// Return value of <c>CFRunLoopRunInMode</c> when the timeout expires
+    /// without a source being handled.
+    /// </summary>
+    internal const int kCFRunLoopRunTimedOut = 3;
+
+    // ── DiskArbitration P/Invoke ───────────────────────────────
+
+    /// <summary>
+    /// Creates a new DiskArbitration session. Must be scheduled with a
+    /// run loop via <see cref="DASessionScheduleWithRunLoop"/> before use.
+    /// Released via <c>CFRelease</c>.
+    /// </summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionCreate")]
+    internal static partial IntPtr DASessionCreate(IntPtr allocator);
+
+    /// <summary>Schedules a DA session on a run loop in the given mode.</summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionScheduleWithRunLoop")]
+    internal static partial void DASessionScheduleWithRunLoop(IntPtr session, IntPtr runLoop, IntPtr runLoopMode);
+
+    /// <summary>Removes a DA session from a run loop.</summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionUnscheduleFromRunLoop")]
+    internal static partial void DASessionUnscheduleFromRunLoop(IntPtr session, IntPtr runLoop, IntPtr runLoopMode);
+
+    /// <summary>
+    /// Creates a DADiskRef for a given BSD name (e.g., "disk1"). The
+    /// returned reference is +1 retained and must be released via <c>CFRelease</c>.
+    /// </summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DADiskCreateFromBSDName", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial IntPtr DADiskCreateFromBSDName(IntPtr allocator, IntPtr session, string bsdName);
+
+    /// <summary>
+    /// Async unmount. The callback fires once the unmount completes or
+    /// fails; the <c>dissenter</c> argument is NULL on success, non-NULL on
+    /// failure. Caller is responsible for blocking on the run loop until
+    /// the callback fires.
+    /// </summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DADiskUnmount")]
+    internal static partial void DADiskUnmount(
+        IntPtr disk,
+        uint options,
+        IntPtr callback,
+        IntPtr context);
+
+    /// <summary>Async mount. Same callback semantics as <see cref="DADiskUnmount"/>.</summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DADiskMount")]
+    internal static partial void DADiskMount(
+        IntPtr disk,
+        IntPtr path,
+        uint options,
+        IntPtr callback,
+        IntPtr context);
+
+    /// <summary>Gets a human-readable status string from a DA dissenter object, or NULL if none.</summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DADissenterGetStatusString")]
+    internal static partial IntPtr DADissenterGetStatusString(IntPtr dissenter);
+
+    // ── CoreFoundation P/Invoke ────────────────────────────────
+
+    /// <summary>
+    /// Releases a CFTypeRef. Safe to call with <see cref="IntPtr.Zero"/>
+    /// (CoreFoundation's <c>CFRelease</c> tolerates NULL).
+    /// </summary>
+    [LibraryImport(CoreFoundationFramework, EntryPoint = "CFRelease")]
+    internal static partial void CFRelease(IntPtr cf);
+
+    /// <summary>Returns the current thread's run loop (borrowed reference — do NOT release).</summary>
+    [LibraryImport(CoreFoundationFramework, EntryPoint = "CFRunLoopGetCurrent")]
+    internal static partial IntPtr CFRunLoopGetCurrent();
+
+    /// <summary>
+    /// Runs the current run loop in the given mode for up to <paramref name="seconds"/>.
+    /// Returns one of the <c>kCFRunLoopRun*</c> constants.
+    /// </summary>
+    [LibraryImport(CoreFoundationFramework, EntryPoint = "CFRunLoopRunInMode")]
+    internal static partial int CFRunLoopRunInMode(
+        IntPtr mode,
+        double seconds,
+        [MarshalAs(UnmanagedType.I1)] bool returnAfterSourceHandled);
+
+    /// <summary>Stops the given run loop, causing any nested <c>CFRunLoopRunInMode</c> to return.</summary>
+    [LibraryImport(CoreFoundationFramework, EntryPoint = "CFRunLoopStop")]
+    internal static partial void CFRunLoopStop(IntPtr runLoop);
+
+    /// <summary>
+    /// Global string constant <c>kCFRunLoopDefaultMode</c>. Exposed as a
+    /// <see cref="IntPtr"/> because dereferencing CoreFoundation string
+    /// constants requires <see cref="NativeLibrary.GetExport"/>.
+    /// </summary>
+    internal static IntPtr GetCFRunLoopDefaultMode()
+    {
+        IntPtr handle = NativeLibrary.Load(CoreFoundationFramework);
+        IntPtr symbolAddress = NativeLibrary.GetExport(handle, "kCFRunLoopDefaultMode");
+        // The symbol is a pointer TO a CFStringRef, so we need one deref.
+        return Marshal.ReadIntPtr(symbolAddress);
+    }
+}
+
+/// <summary>
+/// Managed delegate matching the C callback signature
+/// <c>void (*)(DADiskRef disk, DADissenterRef dissenter, void *context)</c>.
+/// Used for both <c>DADiskUnmount</c> and <c>DADiskMount</c> completion.
+/// </summary>
+/// <remarks>
+/// The delegate must be kept alive for the duration of the unmanaged call.
+/// <c>GC.KeepAlive(callback)</c> after <c>CFRunLoopRunInMode</c> returns is
+/// the documented pattern — "local variable in scope" is not equivalent to
+/// "GC sees the delegate as reachable across unmanaged boundaries" under
+/// release JIT optimization.
+/// </remarks>
+[UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+internal delegate void DADiskCallback(IntPtr disk, IntPtr dissenter, IntPtr context);
