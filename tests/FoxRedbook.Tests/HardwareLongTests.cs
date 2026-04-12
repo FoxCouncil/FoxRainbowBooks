@@ -18,15 +18,9 @@ public sealed class HardwareLongTests
     {
         using var drive = TryOpenOrSkip();
 
-        var toc = await drive.ReadTocAsync().ConfigureAwait(false);
-        Skip.IfNot(toc.TrackCount > 0, "No tracks in TOC.");
+        var toc = await HardwareTests.TryReadTocOrSkip(drive).ConfigureAwait(false);
 
-        TrackInfo? firstAudioTrack = toc.Tracks
-            .Cast<TrackInfo?>()
-            .FirstOrDefault(t => t!.Value.Type == TrackType.Audio);
-        Skip.IfNot(firstAudioTrack.HasValue, "No audio tracks — insert an audio CD.");
-
-        var track = firstAudioTrack!.Value;
+        var track = toc.Tracks.First(t => t.Type == TrackType.Audio);
 
         int? driveOffset = KnownDriveOffsets.Lookup(drive.Inquiry);
         Console.WriteLine(driveOffset.HasValue
