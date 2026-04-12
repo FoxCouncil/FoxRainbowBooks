@@ -115,17 +115,37 @@ internal static class HardwareTestEnvironment
     private static string? DetectLinuxDrive()
     {
         // Linux optical drives are /dev/sr0, /dev/sr1, etc.
+        // Prefer one with an audio CD inserted.
+        string? firstDrive = null;
+
         for (int i = 0; i < 8; i++)
         {
             string path = $"/dev/sr{i}";
 
-            if (File.Exists(path))
+            if (!File.Exists(path))
             {
-                return path;
+                continue;
             }
+
+            try
+            {
+                using var drive = OpticalDrive.Open(path);
+                var toc = drive.ReadTocAsync().GetAwaiter().GetResult();
+
+                if (toc.Tracks.Any(t => t.Type == TrackType.Audio))
+                {
+                    return path;
+                }
+            }
+            catch (OpticalDriveException)
+            {
+                // Drive exists but can't read TOC (no disc, permissions, etc.)
+            }
+
+            firstDrive ??= path;
         }
 
-        return null;
+        return firstDrive;
     }
 
     private static string? DetectMacDrive()
