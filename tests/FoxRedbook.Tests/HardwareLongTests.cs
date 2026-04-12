@@ -9,6 +9,7 @@ namespace FoxRedbook.Tests;
 /// the fast smoke tiers. A single track rip takes 30 seconds to several
 /// minutes depending on disc and drive speed.
 /// </summary>
+[Collection(nameof(SerialHardware))]
 [Trait("Category", "Hardware")]
 public sealed class HardwareLongTests
 {

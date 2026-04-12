@@ -39,6 +39,14 @@ internal static partial class DiskArbitrationNative
     /// <summary><c>kDADiskUnmountOptionDefault</c> = 0.</summary>
     internal const uint kDADiskUnmountOptionDefault = 0;
 
+    /// <summary>
+    /// Unmounts the whole disc, cascading to any mounted filesystem children.
+    /// Required for hybrid audio/data CDs where an Apple_HFS or ISO9660 partition
+    /// is mounted underneath the whole-disk identifier. The default option fails
+    /// with opaque errors on these discs.
+    /// </summary>
+    internal const uint kDADiskUnmountOptionWhole = 0x00000001;
+
     /// <summary><c>kDADiskMountOptionDefault</c> = 0.</summary>
     internal const uint kDADiskMountOptionDefault = 0;
 
@@ -99,6 +107,15 @@ internal static partial class DiskArbitrationNative
     [LibraryImport(DiskArbitrationFramework, EntryPoint = "DADissenterGetStatusString")]
     internal static partial IntPtr DADissenterGetStatusString(IntPtr dissenter);
 
+    /// <summary>
+    /// Gets the numeric <c>DAReturn</c> status code from a DA dissenter object.
+    /// Always present, unlike <see cref="DADissenterGetStatusString"/> which may
+    /// return NULL. Common values: <c>0xF8DA0002</c> (busy),
+    /// <c>0xF8DA0008</c> (not permitted), <c>0xF8DA0009</c> (not privileged).
+    /// </summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DADissenterGetStatus")]
+    internal static partial uint DADissenterGetStatus(IntPtr dissenter);
+
     // ── CoreFoundation P/Invoke ────────────────────────────────
 
     /// <summary>
@@ -125,6 +142,27 @@ internal static partial class DiskArbitrationNative
     /// <summary>Stops the given run loop, causing any nested <c>CFRunLoopRunInMode</c> to return.</summary>
     [LibraryImport(CoreFoundationFramework, EntryPoint = "CFRunLoopStop")]
     internal static partial void CFRunLoopStop(IntPtr runLoop);
+
+    /// <summary>
+    /// Creates a <c>CFUUIDRef</c> from raw 16-byte UUID data. The returned
+    /// object is +1 retained and must be released via <see cref="CFRelease"/>.
+    /// CoreFoundation may return an existing singleton with a bumped ref count.
+    /// </summary>
+    [LibraryImport(CoreFoundationFramework, EntryPoint = "CFUUIDCreateFromUUIDBytes")]
+    internal static partial IntPtr CFUUIDCreateFromUUIDBytes(IntPtr allocator, CFUUIDBytes bytes);
+
+    /// <summary><c>kCFStringEncodingUTF8</c> = 0x08000100.</summary>
+    internal const uint kCFStringEncodingUTF8 = 0x08000100;
+
+    /// <summary>
+    /// Copies the contents of a <c>CFStringRef</c> into a caller-supplied
+    /// buffer as a null-terminated C string in the given encoding.
+    /// Returns <see langword="true"/> on success.
+    /// </summary>
+    [LibraryImport(CoreFoundationFramework, EntryPoint = "CFStringGetCString")]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static partial bool CFStringGetCString(
+        IntPtr theString, IntPtr buffer, long bufferSize, uint encoding);
 
     /// <summary>
     /// Global string constant <c>kCFRunLoopDefaultMode</c>. Exposed as a
@@ -154,3 +192,29 @@ internal static partial class DiskArbitrationNative
 /// </remarks>
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 internal delegate void DADiskCallback(IntPtr disk, IntPtr dissenter, IntPtr context);
+
+/// <summary>
+/// Managed mirror of Apple's <c>CFUUIDBytes</c> struct — 16 raw bytes that
+/// define a UUID. Passed by value to <see cref="DiskArbitrationNative.CFUUIDCreateFromUUIDBytes"/>
+/// to create a proper <c>CFUUIDRef</c> object.
+/// </summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct CFUUIDBytes
+{
+    public byte Byte0, Byte1, Byte2, Byte3;
+    public byte Byte4, Byte5, Byte6, Byte7;
+    public byte Byte8, Byte9, Byte10, Byte11;
+    public byte Byte12, Byte13, Byte14, Byte15;
+
+    /// <summary>Creates a <see cref="CFUUIDBytes"/> from a 16-byte span.</summary>
+    public static CFUUIDBytes FromSpan(ReadOnlySpan<byte> uuid)
+    {
+        return new CFUUIDBytes
+        {
+            Byte0  = uuid[0],  Byte1  = uuid[1],  Byte2  = uuid[2],  Byte3  = uuid[3],
+            Byte4  = uuid[4],  Byte5  = uuid[5],  Byte6  = uuid[6],  Byte7  = uuid[7],
+            Byte8  = uuid[8],  Byte9  = uuid[9],  Byte10 = uuid[10], Byte11 = uuid[11],
+            Byte12 = uuid[12], Byte13 = uuid[13], Byte14 = uuid[14], Byte15 = uuid[15],
+        };
+    }
+}

@@ -21,6 +21,7 @@ namespace FoxRedbook.Tests;
 ///   output. Takes 30s–5min depending on track length and drive speed.</item>
 /// </list>
 /// </remarks>
+[Collection(nameof(SerialHardware))]
 [Trait("Category", "Hardware")]
 public sealed class HardwareTests
 {

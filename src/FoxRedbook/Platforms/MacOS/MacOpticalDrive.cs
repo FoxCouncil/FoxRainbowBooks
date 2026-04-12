@@ -53,7 +53,12 @@ public sealed class MacOpticalDrive : IOpticalDrive
 
     // COM interface pointers (NOT SafeHandles — managed manually via the
     // vtable's Release method, see the class remarks).
-    private IntPtr _scsiDeviceInterfacePtr;  // SCSITaskDeviceInterface**
+    // Both must stay alive for the lifetime of the drive: the SCSI device
+    // interface shares the underlying Mach user-client port with the MMC
+    // interface. Releasing the MMC interface early destroys the shared port
+    // and causes MACH_SEND_INVALID_DEST on subsequent SCSI calls.
+    private IntPtr _mmcInterfacePtr;          // MMCDeviceInterface**
+    private IntPtr _scsiDeviceInterfacePtr;   // SCSITaskDeviceInterface**
     private bool _exclusiveAccessHeld;
 
     private DriveInquiry? _cachedInquiry;
@@ -118,7 +123,9 @@ public sealed class MacOpticalDrive : IOpticalDrive
             _service = new SafeIoObjectHandle(servicePtr);
 
             // Phase 3: Load the SCSI plug-in interface and claim exclusive access.
-            _scsiDeviceInterfacePtr = LoadScsiInterface(servicePtr);
+            var interfaces = LoadScsiInterface(servicePtr);
+            _mmcInterfacePtr = interfaces.MmcInterface;
+            _scsiDeviceInterfacePtr = interfaces.ScsiDeviceInterface;
 
             ObtainExclusiveAccess(_scsiDeviceInterfacePtr);
             _exclusiveAccessHeld = true;
@@ -325,9 +332,14 @@ public sealed class MacOpticalDrive : IOpticalDrive
             }
             else
             {
+                // Use kDADiskUnmountOptionWhole to cascade the unmount to any
+                // filesystem children. Hybrid audio/data CDs (e.g. an audio
+                // session plus an Apple_HFS or ISO9660 partition) fail with an
+                // opaque dissenter error under kDADiskUnmountOptionDefault
+                // because the child partition is mounted independently.
                 DiskArbitrationNative.DADiskUnmount(
                     diskPtr,
-                    DiskArbitrationNative.kDADiskUnmountOptionDefault,
+                    DiskArbitrationNative.kDADiskUnmountOptionWhole,
                     callbackPtr,
                     GCHandle.ToIntPtr(stateHandle));
             }
@@ -394,21 +406,50 @@ public sealed class MacOpticalDrive : IOpticalDrive
         }
         else
         {
-            IntPtr messagePtr = DiskArbitrationNative.DADissenterGetStatusString(dissenter);
-
-            if (messagePtr != IntPtr.Zero)
-            {
-                // CFStringRef — converting to managed string requires more
-                // CoreFoundation plumbing than we want to drag in. For now,
-                // record that a dissenter was present and leave the text
-                // out of the message. If the specific dissenter text turns
-                // out to matter during hardware testing, we can add a
-                // CFString-to-managed helper then.
-                state.DissenterMessage = "DiskArbitration dissenter present";
-            }
+            state.DissenterMessage = GetDissenterMessage(dissenter);
         }
 
         DiskArbitrationNative.CFRunLoopStop(DiskArbitrationNative.CFRunLoopGetCurrent());
+    }
+
+    private static unsafe string GetDissenterMessage(IntPtr dissenter)
+    {
+        // Always extract the numeric status code — it's present on every
+        // dissenter, unlike the string which Apple's headers mark __nullable.
+        uint status = DiskArbitrationNative.DADissenterGetStatus(dissenter);
+
+        IntPtr cfString = DiskArbitrationNative.DADissenterGetStatusString(dissenter);
+
+        if (cfString == IntPtr.Zero)
+        {
+            return $"DA status 0x{status:X8}";
+        }
+
+        Span<byte> buffer = stackalloc byte[512];
+
+        fixed (byte* pBuf = buffer)
+        {
+            bool ok = DiskArbitrationNative.CFStringGetCString(
+                cfString,
+                (IntPtr)pBuf,
+                buffer.Length,
+                DiskArbitrationNative.kCFStringEncodingUTF8);
+
+            if (!ok)
+            {
+                return $"DA status 0x{status:X8}";
+            }
+
+            int len = buffer.IndexOf((byte)0);
+
+            if (len < 0)
+            {
+                len = buffer.Length;
+            }
+
+            string message = System.Text.Encoding.UTF8.GetString(buffer[..len]);
+            return $"{message} (DA status 0x{status:X8})";
+        }
     }
 
     private sealed class DACallbackState
@@ -442,37 +483,132 @@ public sealed class MacOpticalDrive : IOpticalDrive
                 $"IOServiceGetMatchingServices failed: 0x{kr:X8}.");
         }
 
+        IntPtr mediaService;
+
         try
         {
-            IntPtr service = IoKitNative.IOIteratorNext(iterator);
+            mediaService = IoKitNative.IOIteratorNext(iterator);
 
-            if (service == IntPtr.Zero)
+            if (mediaService == IntPtr.Zero)
             {
                 throw new OpticalDriveException(
                     $"No IOKit service found for BSD name '{bsdName}'.");
             }
-
-            return service;
         }
         finally
         {
             _ = IoKitNative.IOObjectRelease(iterator);
         }
+
+        // The matching dictionary for a BSD name yields an IOMedia object, but
+        // the SCSI Task plugin interface is exposed by the SCSI peripheral
+        // device that is its IOService-plane ancestor. Walk up until we find
+        // the services node (IOCompactDiscServices / IODVDServices / IOBDServices)
+        // that exposes the IOCFPlugInTypes dictionary needed by
+        // IOCreatePlugInInterfaceForService. The device nub
+        // (IOSCSIPeripheralDeviceType05) sits above the services node and does
+        // NOT carry the plug-in dictionary.
+        return FindScsiPeripheralAncestor(mediaService);
+    }
+
+    /// <summary>
+    /// Walks the IOService plane from <paramref name="mediaService"/> upward,
+    /// looking for an ancestor that is one of the optical-disc services classes
+    /// (<c>IOCompactDiscServices</c>, <c>IODVDServices</c>, or
+    /// <c>IOBDServices</c>). These are parallel siblings, not an inheritance
+    /// chain, so we must check each class name individually. Returns the
+    /// ancestor (retained) and releases <paramref name="mediaService"/>; or
+    /// returns <paramref name="mediaService"/> itself if no matching ancestor
+    /// is found.
+    /// </summary>
+    private static IntPtr FindScsiPeripheralAncestor(IntPtr mediaService)
+    {
+        IntPtr current = mediaService;
+
+        while (true)
+        {
+            if (IsOpticalServicesNode(current))
+            {
+                // Found the services node (IOCompactDiscServices / IODVDServices
+                // / IOBDServices) that owns the IOCFPlugInTypes dictionary.
+                // If it's not the original IOMedia service, release the IOMedia
+                // entry since we're returning a different (retained) object.
+                if (current != mediaService)
+                {
+                    _ = IoKitNative.IOObjectRelease(mediaService);
+                }
+
+                return current;
+            }
+
+            int kr = IoKitNative.IORegistryEntryGetParentEntry(
+                current, IoKitNative.kIOServicePlane, out IntPtr parent);
+
+            if (kr != 0 || parent == IntPtr.Zero)
+            {
+                // Reached the root without finding a SCSI peripheral ancestor.
+                // Release any intermediate entry and fall back to the original
+                // IOMedia service; the plugin load will fail cleanly (or crash
+                // in IOKit's log path on macOS 26, which we can't prevent but
+                // at least the error path is documented).
+                if (current != mediaService)
+                {
+                    _ = IoKitNative.IOObjectRelease(current);
+                }
+
+                return mediaService;
+            }
+
+            // Release the intermediate entry (unless it's the original
+            // mediaService, which we hold as a fallback).
+            if (current != mediaService)
+            {
+                _ = IoKitNative.IOObjectRelease(current);
+            }
+
+            current = parent;
+        }
+    }
+
+    private static bool IsOpticalServicesNode(IntPtr ioObject)
+    {
+        foreach (string className in IoKitNative.OpticalServicesClasses)
+        {
+            if (IoKitNative.IOObjectConformsTo(ioObject, className))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // ── SCSI plug-in interface loading ─────────────────────────
 
-    private static unsafe IntPtr LoadScsiInterface(IntPtr service)
-    {
-        IntPtr plugInInterface = IntPtr.Zero;
+    /// <summary>
+    /// Both the MMC and SCSI device interfaces returned from the plug-in
+    /// loading pipeline. Both must be kept alive for the drive's lifetime
+    /// because they share the underlying Mach user-client port.
+    /// </summary>
+    private readonly record struct ScsiInterfaces(IntPtr MmcInterface, IntPtr ScsiDeviceInterface);
 
-        fixed (byte* pluginTypePtr = IoKitNative.kIOSCSITaskDeviceUserClientTypeID)
-        fixed (byte* interfaceTypePtr = IoKitNative.kIOCFPlugInInterfaceID)
+    private static ScsiInterfaces LoadScsiInterface(IntPtr service)
+    {
+        // IOCreatePlugInInterfaceForService takes CFUUIDRef objects (opaque
+        // CoreFoundation pointers), NOT raw byte arrays. Create proper
+        // CFUUIDRef objects from the 16-byte UUID constants, use them, and
+        // release them afterwards.
+        IntPtr pluginTypeUuid = CreateCFUUID(IoKitNative.kIOMMCDeviceUserClientTypeID);
+        IntPtr interfaceTypeUuid = CreateCFUUID(IoKitNative.kIOCFPlugInInterfaceID);
+
+        IntPtr plugInInterface;
+
+        try
         {
             int rc = IoKitNative.IOCreatePlugInInterfaceForService(
                 service,
-                pluginTypePtr,
-                interfaceTypePtr,
+                pluginTypeUuid,
+                interfaceTypeUuid,
                 out plugInInterface,
                 out int _);
 
@@ -482,61 +618,108 @@ public sealed class MacOpticalDrive : IOpticalDrive
                     $"IOCreatePlugInInterfaceForService failed: 0x{rc:X8}.");
             }
         }
+        finally
+        {
+            DiskArbitrationNative.CFRelease(pluginTypeUuid);
+            DiskArbitrationNative.CFRelease(interfaceTypeUuid);
+        }
 
         try
         {
-            // Now QueryInterface on the plug-in to get the SCSITaskDeviceInterface.
-            // The plug-in vtable has the standard IUnknown header: slot 1 is
-            // QueryInterface. Dereference twice: read the vtable pointer,
-            // then read QueryInterface out of the struct.
-            IntPtr scsiInterface = QueryScsiInterface(plugInInterface);
+            // QueryInterface for the MMCDeviceInterface, then call its
+            // GetSCSITaskDeviceInterface method to get the raw SCSI
+            // passthrough interface. QueryInterface takes REFIID (CFUUIDBytes)
+            // by value — the two-long register-passing pattern handles this.
+            ScsiInterfaces interfaces = QueryScsiInterface(plugInInterface);
 
-            if (scsiInterface == IntPtr.Zero)
+            if (interfaces.ScsiDeviceInterface == IntPtr.Zero)
             {
                 throw new OpticalDriveException(
-                    "QueryInterface for SCSITaskDeviceInterface returned NULL.");
+                    "Failed to obtain SCSITaskDeviceInterface.");
             }
 
-            return scsiInterface;
+            return interfaces;
         }
         finally
         {
-            // Release the base plug-in; we're keeping the secondary SCSI interface.
+            // Release the base plug-in (IOCFPlugInInterface). This is the
+            // CFPlugIn base and is independent of the MMC→SCSI chain —
+            // releasing it after QueryInterface succeeds is correct COM
+            // convention. Only the MMC→SCSI chain has the shared-port issue.
             InvokeIUnknownRelease(plugInInterface);
         }
     }
 
-    private static unsafe IntPtr QueryScsiInterface(IntPtr plugInInterfacePtr)
+    private static IntPtr CreateCFUUID(ReadOnlySpan<byte> uuidBytes)
     {
-        // plugInInterfacePtr is an IOCFPlugInInterface**.
-        // Dereference once to get the vtable pointer.
-        IntPtr vtable = Marshal.ReadIntPtr(plugInInterfacePtr);
+        var bytes = CFUUIDBytes.FromSpan(uuidBytes);
+        IntPtr cfUuid = DiskArbitrationNative.CFUUIDCreateFromUUIDBytes(IntPtr.Zero, bytes);
 
-        // IUnknown layout: offset 0 = _reserved, 8 = QueryInterface.
-        // QueryInterface signature: HRESULT (*)(void* self, CFUUIDBytes iid, void** ppv)
-        // where CFUUIDBytes is passed BY VALUE (16 bytes). On x86_64 System V
-        // calling convention, structs up to 16 bytes pass in registers, so
-        // we declare it as two 8-byte values.
+        if (cfUuid == IntPtr.Zero)
+        {
+            throw new OpticalDriveException("CFUUIDCreateFromUUIDBytes returned NULL.");
+        }
+
+        return cfUuid;
+    }
+
+    /// <summary>
+    /// Obtains an <c>MMCDeviceInterface**</c> and a
+    /// <c>SCSITaskDeviceInterface**</c> from the IOCFPlugInInterface.
+    /// The MMC plugin loaded via <c>kIOMMCDeviceUserClientTypeID</c> does not
+    /// directly support <c>kIOSCSITaskDeviceInterfaceID</c> — it only supports
+    /// <c>kIOMMCDeviceInterfaceID</c>. The MMC interface exposes a
+    /// <c>GetSCSITaskDeviceInterface</c> method (vtable slot 13, offset 136)
+    /// that returns the raw SCSI passthrough interface.
+    /// </summary>
+    /// <remarks>
+    /// The returned MMC interface must be kept alive until the SCSI device
+    /// interface is released. The two share the underlying Mach user-client
+    /// port; releasing the MMC interface early causes
+    /// <c>MACH_SEND_INVALID_DEST</c> (0x10000003) on subsequent SCSI calls.
+    /// </remarks>
+    private static unsafe ScsiInterfaces QueryScsiInterface(IntPtr plugInInterfacePtr)
+    {
+        // Step 1: QueryInterface for kIOMMCDeviceInterfaceID → MMCDeviceInterface**
+        IntPtr vtable = Marshal.ReadIntPtr(plugInInterfacePtr);
         IntPtr queryInterfacePtr = Marshal.ReadIntPtr(vtable, 8);
 
         var queryInterface = (delegate* unmanaged[Cdecl]<IntPtr, long, long, IntPtr*, int>)queryInterfacePtr;
 
-        IntPtr scsiInterface = IntPtr.Zero;
+        IntPtr mmcInterface = IntPtr.Zero;
 
-        // Pack the 16-byte CFUUIDBytes into two longs to match the register-passing ABI.
-        ReadOnlySpan<byte> uuid = IoKitNative.kIOSCSITaskDeviceInterfaceID;
+        ReadOnlySpan<byte> uuid = IoKitNative.kIOMMCDeviceInterfaceID;
         long uuidLow = MemoryMarshal.Read<long>(uuid);
         long uuidHigh = MemoryMarshal.Read<long>(uuid.Slice(8));
 
-        int hr = queryInterface(plugInInterfacePtr, uuidLow, uuidHigh, &scsiInterface);
+        int hr = queryInterface(plugInInterfacePtr, uuidLow, uuidHigh, &mmcInterface);
 
         if (hr != 0)
         {
             throw new OpticalDriveException(
-                $"QueryInterface for SCSITaskDeviceInterface failed: HRESULT 0x{hr:X8}.");
+                $"QueryInterface for MMCDeviceInterface failed: HRESULT 0x{hr:X8}.");
         }
 
-        return scsiInterface;
+        // Step 2: Call GetSCSITaskDeviceInterface through the MMC vtable.
+        // MMCDeviceInterface layout: IUNKNOWN_C_GUTS (4 × 8) + version/revision
+        // (4 + 4 padding) + 13 method slots. GetSCSITaskDeviceInterface is
+        // slot 13 at offset 136.
+        // Signature: SCSITaskDeviceInterface** (*)(void* self)
+        IntPtr mmcVtable = Marshal.ReadIntPtr(mmcInterface);
+        IntPtr getSCSITaskDevicePtr = Marshal.ReadIntPtr(mmcVtable, 136);
+
+        var getSCSITaskDevice = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr>)getSCSITaskDevicePtr;
+        IntPtr scsiInterface = getSCSITaskDevice(mmcInterface);
+
+        if (scsiInterface == IntPtr.Zero)
+        {
+            InvokeIUnknownRelease(mmcInterface);
+
+            throw new OpticalDriveException(
+                "MMCDeviceInterface.GetSCSITaskDeviceInterface returned NULL.");
+        }
+
+        return new ScsiInterfaces(mmcInterface, scsiInterface);
     }
 
     private static unsafe void InvokeIUnknownRelease(IntPtr interfacePtr)
@@ -579,10 +762,18 @@ public sealed class MacOpticalDrive : IOpticalDrive
 
     private void ReleaseScsiInterface()
     {
+        // Release inner (SCSI) before outer (MMC) — the SCSI interface
+        // shares the Mach user-client port owned by the MMC interface.
         if (_scsiDeviceInterfacePtr != IntPtr.Zero)
         {
             InvokeIUnknownRelease(_scsiDeviceInterfacePtr);
             _scsiDeviceInterfacePtr = IntPtr.Zero;
+        }
+
+        if (_mmcInterfacePtr != IntPtr.Zero)
+        {
+            InvokeIUnknownRelease(_mmcInterfacePtr);
+            _mmcInterfacePtr = IntPtr.Zero;
         }
     }
 

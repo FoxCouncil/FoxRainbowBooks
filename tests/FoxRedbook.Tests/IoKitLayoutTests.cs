@@ -94,8 +94,8 @@ public sealed class IoKitLayoutTests
     public void IOKitGuids_AreExactly16BytesEach()
     {
         Assert.Equal(16, IoKitNative.kIOCFPlugInInterfaceID.Length);
-        Assert.Equal(16, IoKitNative.kIOSCSITaskDeviceUserClientTypeID.Length);
-        Assert.Equal(16, IoKitNative.kIOSCSITaskDeviceInterfaceID.Length);
+        Assert.Equal(16, IoKitNative.kIOMMCDeviceUserClientTypeID.Length);
+        Assert.Equal(16, IoKitNative.kIOMMCDeviceInterfaceID.Length);
     }
 
     [Fact]
@@ -111,27 +111,27 @@ public sealed class IoKitLayoutTests
     }
 
     [Fact]
-    public void IOSCSITaskDeviceUserClientTypeID_MatchesHeaderValue()
+    public void IOMMCDeviceUserClientTypeID_MatchesHeaderValue()
     {
-        // 7D66678E-08A2-11D5-A1B8-0030657D052A
+        // 97ABCF2C-23CC-11D5-A0E8-003065704866
         byte[] expected =
         [
-            0x7D, 0x66, 0x67, 0x8E, 0x08, 0xA2, 0x11, 0xD5,
-            0xA1, 0xB8, 0x00, 0x30, 0x65, 0x7D, 0x05, 0x2A,
+            0x97, 0xAB, 0xCF, 0x2C, 0x23, 0xCC, 0x11, 0xD5,
+            0xA0, 0xE8, 0x00, 0x30, 0x65, 0x70, 0x48, 0x66,
         ];
-        Assert.True(expected.AsSpan().SequenceEqual(IoKitNative.kIOSCSITaskDeviceUserClientTypeID));
+        Assert.True(expected.AsSpan().SequenceEqual(IoKitNative.kIOMMCDeviceUserClientTypeID));
     }
 
     [Fact]
-    public void IOSCSITaskDeviceInterfaceID_MatchesHeaderValue()
+    public void IOMMCDeviceInterfaceID_MatchesHeaderValue()
     {
-        // 1BBC4132-08A5-11D5-90ED-0030657D052A
+        // 1F651106-23CC-11D5-BBDB-003065704866
         byte[] expected =
         [
-            0x1B, 0xBC, 0x41, 0x32, 0x08, 0xA5, 0x11, 0xD5,
-            0x90, 0xED, 0x00, 0x30, 0x65, 0x7D, 0x05, 0x2A,
+            0x1F, 0x65, 0x11, 0x06, 0x23, 0xCC, 0x11, 0xD5,
+            0xBB, 0xDB, 0x00, 0x30, 0x65, 0x70, 0x48, 0x66,
         ];
-        Assert.True(expected.AsSpan().SequenceEqual(IoKitNative.kIOSCSITaskDeviceInterfaceID));
+        Assert.True(expected.AsSpan().SequenceEqual(IoKitNative.kIOMMCDeviceInterfaceID));
     }
 
     // ── IOReturn constants (verified against Apple's xnu source) ──

@@ -72,25 +72,32 @@ internal static partial class IoKitNative
     ];
 
     /// <summary>
-    /// <c>kIOSCSITaskDeviceUserClientTypeID</c> = <c>7D66678E-08A2-11D5-A1B8-0030657D052A</c>
-    /// from <c>IOKit/scsi/SCSITaskLib.h</c>. This is the factory type ID passed
-    /// to <see cref="IOCreatePlugInInterfaceForService"/>.
+    /// <c>kIOMMCDeviceUserClientTypeID</c> = <c>97ABCF2C-23CC-11D5-A0E8-003065704866</c>
+    /// from <c>IOKit/scsi/SCSITaskLib.h</c>. This is the plug-in type UUID
+    /// registered in the <c>IOCFPlugInTypes</c> dictionary on
+    /// <c>IOCompactDiscServices</c> / <c>IODVDServices</c> / <c>IOBDServices</c>
+    /// nodes, and must be passed to <see cref="IOCreatePlugInInterfaceForService"/>
+    /// as the <c>pluginType</c> parameter. The resulting plug-in supports
+    /// <c>QueryInterface</c> for <see cref="kIOMMCDeviceInterfaceID"/>.
     /// </summary>
-    internal static ReadOnlySpan<byte> kIOSCSITaskDeviceUserClientTypeID =>
+    internal static ReadOnlySpan<byte> kIOMMCDeviceUserClientTypeID =>
     [
-        0x7D, 0x66, 0x67, 0x8E, 0x08, 0xA2, 0x11, 0xD5,
-        0xA1, 0xB8, 0x00, 0x30, 0x65, 0x7D, 0x05, 0x2A,
+        0x97, 0xAB, 0xCF, 0x2C, 0x23, 0xCC, 0x11, 0xD5,
+        0xA0, 0xE8, 0x00, 0x30, 0x65, 0x70, 0x48, 0x66,
     ];
 
     /// <summary>
-    /// <c>kIOSCSITaskDeviceInterfaceID</c> = <c>1BBC4132-08A5-11D5-90ED-0030657D052A</c>
+    /// <c>kIOMMCDeviceInterfaceID</c> = <c>1F651106-23CC-11D5-BBDB-003065704866</c>
     /// from <c>IOKit/scsi/SCSITaskLib.h</c>. Passed to <c>QueryInterface</c>
-    /// to get the <see cref="SCSITaskDeviceInterface"/> vtable.
+    /// on the plug-in loaded via <see cref="kIOMMCDeviceUserClientTypeID"/> to
+    /// obtain an <c>MMCDeviceInterface</c> vtable. The MMC interface exposes a
+    /// <c>GetSCSITaskDeviceInterface</c> method (vtable offset 136) that returns
+    /// a <see cref="SCSITaskDeviceInterface"/> pointer for raw SCSI passthrough.
     /// </summary>
-    internal static ReadOnlySpan<byte> kIOSCSITaskDeviceInterfaceID =>
+    internal static ReadOnlySpan<byte> kIOMMCDeviceInterfaceID =>
     [
-        0x1B, 0xBC, 0x41, 0x32, 0x08, 0xA5, 0x11, 0xD5,
-        0x90, 0xED, 0x00, 0x30, 0x65, 0x7D, 0x05, 0x2A,
+        0x1F, 0x65, 0x11, 0x06, 0x23, 0xCC, 0x11, 0xD5,
+        0xBB, 0xDB, 0x00, 0x30, 0x65, 0x70, 0x48, 0x66,
     ];
 
     // ── IOReturn error codes (from xnu/iokit/IOKit/IOReturn.h) ──────
@@ -173,16 +180,59 @@ internal static partial class IoKitNative
     internal static partial int IOObjectRelease(IntPtr ioObject);
 
     /// <summary>
+    /// Returns the parent of an IORegistry entry in the specified plane.
+    /// The parent is +1 retained and must be released via <see cref="IOObjectRelease"/>.
+    /// </summary>
+    [LibraryImport(IOKitFramework, EntryPoint = "IORegistryEntryGetParentEntry", StringMarshalling = StringMarshalling.Utf8)]
+    internal static partial int IORegistryEntryGetParentEntry(
+        IntPtr entry, string plane, out IntPtr parent);
+
+    /// <summary>
+    /// Returns <see langword="true"/> if the given IOKit object conforms to
+    /// the named IOKit class (e.g., <c>IOSCSIPeripheralDeviceType05</c>).
+    /// </summary>
+    [LibraryImport(IOKitFramework, EntryPoint = "IOObjectConformsTo", StringMarshalling = StringMarshalling.Utf8)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static partial bool IOObjectConformsTo(IntPtr ioObject, string className);
+
+    /// <summary>IOService plane name for IORegistry traversal.</summary>
+    internal const string kIOServicePlane = "IOService";
+
+    /// <summary>
+    /// IOKit class names for the optical-disc services layer. These are
+    /// parallel siblings (not an inheritance chain): a CD-only drive registers
+    /// <c>IOCompactDiscServices</c>, a DVD drive registers <c>IODVDServices</c>,
+    /// and a BD drive registers <c>IOBDServices</c>. The services node (not
+    /// the peripheral device nub above it) is the one that exposes the
+    /// <c>IOCFPlugInTypes</c> dictionary needed by
+    /// <see cref="IOCreatePlugInInterfaceForService"/>.
+    /// </summary>
+    internal static readonly string[] OpticalServicesClasses =
+    [
+        "IOBDServices",
+        "IODVDServices",
+        "IOCompactDiscServices",
+    ];
+
+    /// <summary>
     /// Loads the IOKit plug-in interface for a given service and returns a
     /// pointer to a <c>IOCFPlugInInterface**</c> (an interface pointer to a
     /// pointer to a vtable — COM convention). The score parameter is
     /// typically discarded.
     /// </summary>
+    /// <remarks>
+    /// Both <paramref name="pluginType"/> and <paramref name="interfaceType"/>
+    /// are <c>CFUUIDRef</c> objects — opaque CoreFoundation pointers created via
+    /// <c>CFUUIDCreateFromUUIDBytes</c>. Passing raw <c>byte*</c> pointers
+    /// instead crashes in IOKit's error-logging path on macOS 26: the os_log
+    /// formatter calls <c>objc_msgSend</c> on the "CFUUIDRef" to get its
+    /// description, which dereferences the raw UUID bytes as an isa pointer.
+    /// </remarks>
     [LibraryImport(IOKitFramework, EntryPoint = "IOCreatePlugInInterfaceForService")]
-    internal static unsafe partial int IOCreatePlugInInterfaceForService(
+    internal static partial int IOCreatePlugInInterfaceForService(
         IntPtr service,
-        byte* pluginType,    // pointer to 16-byte CFUUIDBytes
-        byte* interfaceType, // pointer to 16-byte CFUUIDBytes
+        IntPtr pluginType,
+        IntPtr interfaceType,
         out IntPtr plugInInterface,
         out int score);
 }
