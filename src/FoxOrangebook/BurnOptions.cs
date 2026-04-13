@@ -27,4 +27,14 @@ public sealed record BurnOptions
     /// 75,264 bytes per command — a good balance.
     /// </summary>
     public int SectorsPerWrite { get; init; } = 32;
+
+    /// <summary>
+    /// Disc title for cue sheet and CD-Text. Optional.
+    /// </summary>
+    public string? DiscTitle { get; init; }
+
+    /// <summary>
+    /// Disc performer for cue sheet and CD-Text. Optional.
+    /// </summary>
+    public string? DiscPerformer { get; init; }
 }

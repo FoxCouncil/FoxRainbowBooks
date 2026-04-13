@@ -24,6 +24,16 @@ public sealed class AudioTrackSource
     public int PregapSectors { get; init; }
 
     /// <summary>
+    /// Track title for CD-Text and cue sheet metadata. Optional.
+    /// </summary>
+    public string? Title { get; init; }
+
+    /// <summary>
+    /// Track performer/artist for CD-Text and cue sheet metadata. Optional.
+    /// </summary>
+    public string? Performer { get; init; }
+
+    /// <summary>
     /// Number of audio sectors in this track. Computed from the
     /// stream length: <c>Pcm.Length / 2352</c>.
     /// </summary>

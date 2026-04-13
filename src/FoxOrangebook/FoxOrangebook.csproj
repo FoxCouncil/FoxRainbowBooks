@@ -2,8 +2,8 @@
 
   <PropertyGroup>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <Description>CD-R/CD-RW burning library for .NET</Description>
-    <PackageTags>cd-r;cd-rw;burning;orange-book;disc-at-once</PackageTags>
+    <Description>Disc-At-Once audio CD burning with cue sheet programming, buffer underrun protection, and file-backed burn simulation</Description>
+    <PackageTags>cd-r;cd-rw;burning;orange-book;disc-at-once;cue-sheet</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

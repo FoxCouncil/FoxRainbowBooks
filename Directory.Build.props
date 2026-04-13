@@ -31,8 +31,8 @@
     <RepositoryUrl>https://github.com/FoxCouncil/FoxRainbowBooks</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <RepositoryCommit Condition="'$(GITHUB_SHA)' != ''">$(GITHUB_SHA)</RepositoryCommit>
-    <Description>Bit-perfect audio CD ripping library for .NET</Description>
-    <PackageTags>cd-audio;cdda;ripping;red-book;accuraterip;musicbrainz</PackageTags>
+    <Description>Cross-platform .NET libraries for optical disc I/O</Description>
+    <PackageTags>cd;optical-disc;scsi</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 

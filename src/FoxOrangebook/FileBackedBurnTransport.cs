@@ -32,6 +32,18 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         _cuePath = Path.ChangeExtension(binPath, ".cue");
     }
 
+    /// <summary>Disc title for the cue sheet header.</summary>
+    public string? DiscTitle { get; set; }
+
+    /// <summary>Disc performer for the cue sheet header.</summary>
+    public string? DiscPerformer { get; set; }
+
+    /// <summary>
+    /// Per-track metadata for the cue sheet. Index matches track order
+    /// (element 0 = track 1). Set before calling <see cref="BurnSession.BurnAsync"/>.
+    /// </summary>
+    public IReadOnlyList<(string? Title, string? Performer)> TrackMetadata { get; set; } = Array.Empty<(string?, string?)>();
+
     /// <inheritdoc />
     public DriveInquiry Inquiry => new()
     {
@@ -178,8 +190,34 @@ public sealed class FileBackedBurnTransport : IScsiTransport
     private void WriteCueFile()
     {
         var sb = new StringBuilder();
+
+        if (DiscPerformer is not null)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"PERFORMER \"{DiscPerformer}\"");
+        }
+
+        if (DiscTitle is not null)
+        {
+            sb.AppendLine(CultureInfo.InvariantCulture, $"TITLE \"{DiscTitle}\"");
+        }
+
         string binFileName = Path.GetFileName(_binPath);
         sb.AppendLine(CultureInfo.InvariantCulture, $"FILE \"{binFileName}\" BINARY");
+
+        // Find the first data position for file-relative MSF conversion.
+        int firstDataFrame = 0;
+
+        foreach (var e in _cueEntries)
+        {
+            if (e.TrackNumber != CueSheetEntry.LeadInTrack && e.TrackNumber != CueSheetEntry.LeadOutTrack)
+            {
+                firstDataFrame = e.Minute * 60 * 75 + e.Second * 75 + e.Frame;
+                break;
+            }
+        }
+
+        // Group entries by track number, emit TRACK line first, then indices.
+        byte currentTrack = 0;
 
         foreach (var entry in _cueEntries)
         {
@@ -188,47 +226,38 @@ public sealed class FileBackedBurnTransport : IScsiTransport
                 continue;
             }
 
-            if (entry.Index == 0x01 || entry.Index == 0x00)
+            if (entry.TrackNumber != currentTrack)
             {
-                if (entry.Index == 0x01)
+                currentTrack = entry.TrackNumber;
+                sb.AppendLine(CultureInfo.InvariantCulture, $"  TRACK {currentTrack:D2} AUDIO");
+
+                int trackIdx = currentTrack - 1;
+
+                if (trackIdx < TrackMetadata.Count)
                 {
-                    sb.AppendLine(CultureInfo.InvariantCulture, $"  TRACK {entry.TrackNumber:D2} AUDIO");
-                }
+                    var (title, performer) = TrackMetadata[trackIdx];
 
-                // Convert absolute MSF back to file-relative MSF.
-                // The cue sheet uses absolute MSF (with the 2-second offset),
-                // but .cue files use file-relative positions. Since we write
-                // sectors starting from the pregap of track 1, we need to
-                // subtract the first track's pregap MSF to get file-relative.
-                int absFrames = entry.Minute * 60 * 75 + entry.Second * 75 + entry.Frame;
-
-                // Find the first audio data position (first pregap or first index 1)
-                int firstDataFrame = 0;
-
-                foreach (var e in _cueEntries)
-                {
-                    if (e.TrackNumber != CueSheetEntry.LeadInTrack && e.TrackNumber != CueSheetEntry.LeadOutTrack)
+                    if (title is not null)
                     {
-                        firstDataFrame = e.Minute * 60 * 75 + e.Second * 75 + e.Frame;
-                        break;
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"    TITLE \"{title}\"");
+                    }
+
+                    if (performer is not null)
+                    {
+                        sb.AppendLine(CultureInfo.InvariantCulture, $"    PERFORMER \"{performer}\"");
                     }
                 }
-
-                int relFrames = absFrames - firstDataFrame;
-
-                if (relFrames < 0)
-                {
-                    relFrames = 0;
-                }
-
-                int relMin = relFrames / 75 / 60;
-                int relSec = (relFrames / 75) % 60;
-                int relFrame = relFrames % 75;
-
-                sb.AppendLine(CultureInfo.InvariantCulture, $"    INDEX {entry.Index:D2} {relMin:D2}:{relSec:D2}:{relFrame:D2}");
             }
+
+            int absFrames = entry.Minute * 60 * 75 + entry.Second * 75 + entry.Frame;
+            int relFrames = Math.Max(0, absFrames - firstDataFrame);
+            int relMin = relFrames / 75 / 60;
+            int relSec = (relFrames / 75) % 60;
+            int relFrame = relFrames % 75;
+
+            sb.AppendLine(CultureInfo.InvariantCulture, $"    INDEX {entry.Index:D2} {relMin:D2}:{relSec:D2}:{relFrame:D2}");
         }
 
-        File.WriteAllText(_cuePath, sb.ToString(), Encoding.UTF8);
+        File.WriteAllText(_cuePath, sb.ToString(), new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
     }
 }
