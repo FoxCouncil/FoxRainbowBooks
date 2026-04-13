@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <!-- Orange CD disc - outer edge -->
+  <circle cx="64" cy="64" r="62" fill="#222" stroke="#111" stroke-width="1"/>
+  <circle cx="64" cy="64" r="60" fill="#DD7711"/>
+
+  <!-- Disc rainbow shimmer bands (CD, not vinyl) -->
+  <circle cx="64" cy="64" r="56" fill="none" stroke="#EE8833" stroke-width="3" opacity="0.3"/>
+  <circle cx="64" cy="64" r="52" fill="none" stroke="#FFAA55" stroke-width="2" opacity="0.2"/>
+  <circle cx="64" cy="64" r="48" fill="none" stroke="#FFCC88" stroke-width="1.5" opacity="0.15"/>
+  <circle cx="64" cy="64" r="44" fill="none" stroke="#FFDDAA" stroke-width="1" opacity="0.15"/>
+  <circle cx="64" cy="64" r="40" fill="none" stroke="#FFCC88" stroke-width="1.5" opacity="0.15"/>
+  <circle cx="64" cy="64" r="36" fill="none" stroke="#FFAA55" stroke-width="2" opacity="0.2"/>
+
+  <!-- CD iridescent shine arcs -->
+  <path d="M30,30 Q64,20 98,30" fill="none" stroke="white" stroke-width="6" opacity="0.08"/>
+  <path d="M24,50 Q64,38 104,50" fill="none" stroke="white" stroke-width="4" opacity="0.06"/>
+  <path d="M20,75 Q64,90 108,75" fill="none" stroke="white" stroke-width="3" opacity="0.05"/>
+
+  <!-- Center label area -->
+  <circle cx="64" cy="64" r="26" fill="#EE8822" stroke="#CC6600" stroke-width="1"/>
+
+  <!-- Fox face centered in the hub -->
+  <g transform="translate(64, 64)">
+    <!-- Black border circle behind fox -->
+    <circle cx="0" cy="0" r="21" fill="#111"/>
+
+    <!-- Fox shifted down within the hub -->
+    <g transform="translate(0, 4)">
+    <!-- Left ear -->
+    <polygon points="-15,-10 -10,-22 -4,-9" fill="#C63C1E"/>
+    <polygon points="-13,-11 -10,-19 -6,-10" fill="white" opacity="0.7"/>
+    <!-- Right ear -->
+    <polygon points="15,-10 10,-22 4,-9" fill="#C63C1E"/>
+    <polygon points="13,-11 10,-19 6,-10" fill="white" opacity="0.7"/>
+
+    <!-- Head -->
+    <ellipse cx="0" cy="-2" rx="16" ry="14" fill="#C63C1E"/>
+
+    <!-- White face -->
+    <ellipse cx="0" cy="3" rx="11" ry="10" fill="white"/>
+
+    <!-- White forehead stripe -->
+    <path d="M-3,-14 Q0,-8 3,-14" fill="white" opacity="0.6"/>
+
+    <!-- Eyes -->
+    <ellipse cx="-6" cy="-5" rx="3" ry="3.5" fill="white"/>
+    <ellipse cx="6" cy="-5" rx="3" ry="3.5" fill="white"/>
+    <circle cx="-5.5" cy="-4.5" r="2" fill="#1a1a1a"/>
+    <circle cx="6.5" cy="-4.5" r="2" fill="#1a1a1a"/>
+    <circle cx="-4.8" cy="-5.3" r="0.7" fill="white"/>
+    <circle cx="7.2" cy="-5.3" r="0.7" fill="white"/>
+
+    <!-- Nose -->
+    <ellipse cx="0" cy="1" rx="3.5" ry="2.2" fill="#1a1a1a"/>
+    <ellipse cx="-0.5" cy="0.3" rx="1" ry="0.5" fill="white" opacity="0.3"/>
+
+    <!-- Mouth -->
+    <path d="M-2,3.5 Q0,6 2,3.5" fill="none" stroke="#1a1a1a" stroke-width="0.8" stroke-linecap="round"/>
+
+    <!-- Cheek fur tufts -->
+    <path d="M-14,0 Q-17,3 -13,6" fill="none" stroke="#C63C1E" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M14,0 Q17,3 13,6" fill="none" stroke="#C63C1E" stroke-width="1.5" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>
