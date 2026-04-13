@@ -27,8 +27,8 @@
     <Company>FoxCouncil</Company>
     <Copyright>Copyright © FoxCouncil $([System.DateTime]::Now.Year)</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/FoxCouncil/FoxRedbook</PackageProjectUrl>
-    <RepositoryUrl>https://github.com/FoxCouncil/FoxRedbook</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/FoxCouncil/FoxRainbowBooks</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/FoxCouncil/FoxRainbowBooks</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <RepositoryCommit Condition="'$(GITHUB_SHA)' != ''">$(GITHUB_SHA)</RepositoryCommit>
     <Description>Bit-perfect audio CD ripping library for .NET</Description>
