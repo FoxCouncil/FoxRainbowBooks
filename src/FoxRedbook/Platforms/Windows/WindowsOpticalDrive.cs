@@ -39,7 +39,7 @@ namespace FoxRedbook.Platforms.Windows;
 /// </para>
 /// </remarks>
 [SupportedOSPlatform("windows")]
-public sealed class WindowsOpticalDrive : IOpticalDrive
+public sealed class WindowsOpticalDrive : IOpticalDrive, IScsiTransport
 {
     private const uint DefaultTimeoutSeconds = 30;
 
@@ -219,6 +219,22 @@ public sealed class WindowsOpticalDrive : IOpticalDrive
     {
         Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public void Execute(ReadOnlySpan<byte> cdb, Span<byte> buffer, ScsiDirection direction)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        byte dataIn = direction switch
+        {
+            ScsiDirection.None => Win32Native.SCSI_IOCTL_DATA_UNSPECIFIED,
+            ScsiDirection.In => Win32Native.SCSI_IOCTL_DATA_IN,
+            ScsiDirection.Out => Win32Native.SCSI_IOCTL_DATA_OUT,
+            _ => throw new ArgumentOutOfRangeException(nameof(direction)),
+        };
+
+        ExecuteScsiCommand(cdb, buffer, dataIn);
     }
 
     // ── Internals ──────────────────────────────────────────────

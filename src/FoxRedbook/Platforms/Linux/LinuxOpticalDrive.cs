@@ -26,7 +26,7 @@ namespace FoxRedbook.Platforms.Linux;
 /// </para>
 /// </remarks>
 [SupportedOSPlatform("linux")]
-public sealed class LinuxOpticalDrive : IOpticalDrive
+public sealed class LinuxOpticalDrive : IOpticalDrive, IScsiTransport
 {
     private const uint DefaultTimeoutMs = 30_000;
     private const int SenseBufferSize = 18; // fixed-format sense data
@@ -188,6 +188,22 @@ public sealed class LinuxOpticalDrive : IOpticalDrive
     {
         Dispose();
         return ValueTask.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public void Execute(ReadOnlySpan<byte> cdb, Span<byte> buffer, ScsiDirection direction)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        int dxfer = direction switch
+        {
+            ScsiDirection.None => SgIoNative.SG_DXFER_NONE,
+            ScsiDirection.In => SgIoNative.SG_DXFER_FROM_DEV,
+            ScsiDirection.Out => SgIoNative.SG_DXFER_TO_DEV,
+            _ => throw new ArgumentOutOfRangeException(nameof(direction)),
+        };
+
+        ExecuteScsiCommand(cdb, buffer, dxfer);
     }
 
     // ── Internals ──────────────────────────────────────────────

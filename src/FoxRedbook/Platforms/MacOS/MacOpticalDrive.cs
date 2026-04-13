@@ -40,7 +40,7 @@ namespace FoxRedbook.Platforms.MacOS;
 /// </para>
 /// </remarks>
 [SupportedOSPlatform("macos")]
-public sealed class MacOpticalDrive : IOpticalDrive
+public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 {
     private const uint DefaultTimeoutMs = 30_000;
     private const int SenseBufferSize = 32;
@@ -777,6 +777,22 @@ public sealed class MacOpticalDrive : IOpticalDrive
         }
     }
 
+    /// <inheritdoc />
+    public void Execute(ReadOnlySpan<byte> cdb, Span<byte> buffer, ScsiDirection direction)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        byte transfer = direction switch
+        {
+            ScsiDirection.None => IoKitNative.kSCSIDataTransfer_NoDataTransfer,
+            ScsiDirection.In => IoKitNative.kSCSIDataTransfer_FromTargetToInitiator,
+            ScsiDirection.Out => IoKitNative.kSCSIDataTransfer_FromInitiatorToTarget,
+            _ => throw new ArgumentOutOfRangeException(nameof(direction)),
+        };
+
+        ExecuteScsiCommand(cdb, buffer, transfer);
+    }
+
     // ── SCSI command execution via the task interface ──────────
 
     private DriveInquiry QueryInquiry()
@@ -790,7 +806,7 @@ public sealed class MacOpticalDrive : IOpticalDrive
         return ScsiCommands.ParseInquiry(response);
     }
 
-    private unsafe void ExecuteScsiCommand(ReadOnlySpan<byte> cdb, Span<byte> dataBuffer)
+    private unsafe void ExecuteScsiCommand(ReadOnlySpan<byte> cdb, Span<byte> dataBuffer, byte transferDirection = IoKitNative.kSCSIDataTransfer_FromTargetToInitiator)
     {
         // Step 1: CreateSCSITask via the device interface vtable.
         IntPtr deviceVtable = Marshal.ReadIntPtr(_scsiDeviceInterfacePtr);
@@ -832,7 +848,7 @@ public sealed class MacOpticalDrive : IOpticalDrive
                 };
 
                 var setSg = (delegate* unmanaged[Cdecl]<IntPtr, IOVirtualRange*, byte, ulong, byte, int>)Marshal.ReadIntPtr(taskVtable, 88);
-                rc = setSg(taskPtr, &range, 1, (ulong)dataBuffer.Length, IoKitNative.kSCSIDataTransfer_FromTargetToInitiator);
+                rc = setSg(taskPtr, &range, 1, (ulong)dataBuffer.Length, transferDirection);
 
                 if (rc != IoKitNative.kIOReturnSuccess)
                 {

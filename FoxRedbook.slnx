@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/FoxRedbook/FoxRedbook.csproj" />
+    <Project Path="src/FoxOrangebook/FoxOrangebook.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FoxRedbook.Tests/FoxRedbook.Tests.csproj" />
+    <Project Path="tests/FoxOrangebook.Tests/FoxOrangebook.Tests.csproj" />
   </Folder>
 </Solution>
