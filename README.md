@@ -57,7 +57,7 @@ uint arV2 = session.GetAccurateRipV2Crc(track);
 | Platform | Backend | Tested Hardware |
 |----------|---------|-----------------|
 | Windows | `DeviceIoControl` + `SCSI_PASS_THROUGH_DIRECT` | Pioneer BDR-XS07U |
-| Linux | `ioctl(SG_IO)` | — |
+| Linux | `ioctl(SG_IO)` | Pioneer BDR-XS07U |
 | macOS | IOKit `MMCDeviceInterface` | Pioneer BDR-XS07U |
 
 Device paths: `D:` or `\\.\CdRom0` on Windows, `/dev/sr0` on Linux, `disk1` on macOS.
