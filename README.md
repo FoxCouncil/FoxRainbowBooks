@@ -3,6 +3,7 @@
 Cross-platform, AOT-compatible .NET 8 libraries for optical disc I/O — named for the [Rainbow Books](https://en.wikipedia.org/wiki/Rainbow_Books) that define the CD family of standards.
 
 [![NuGet FoxRedbook](https://img.shields.io/nuget/v/FoxRedbook.svg?label=FoxRedbook)](https://www.nuget.org/packages/FoxRedbook)
+[![NuGet FoxOrangebook](https://img.shields.io/nuget/v/FoxOrangebook.svg?label=FoxOrangebook)](https://www.nuget.org/packages/FoxOrangebook)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## SCSI Transport Layer
@@ -20,9 +21,18 @@ Device paths: `D:` or `\\.\CdRom0` on Windows, `/dev/sr0` on Linux, `disk1` on m
 - **AOT-compatible** — all P/Invoke uses `LibraryImport` source generation, no runtime marshalling
 - **Zero external dependencies** at runtime
 
-## FoxRedbook — CD-DA Ripping
+---
+
+## <img src="assets/foxredbook.png" width="32" height="32" align="top"/> FoxRedbook — CD-DA Ripping
 
 Bit-perfect audio CD ripping with AccurateRip verification. Named for the [Red Book](https://en.wikipedia.org/wiki/Compact_Disc_Digital_Audio) specification (IEC 60908).
+
+[![NuGet](https://img.shields.io/nuget/v/FoxRedbook.svg)](https://www.nuget.org/packages/FoxRedbook)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/FoxRedbook.svg)](https://www.nuget.org/packages/FoxRedbook)
+
+```
+dotnet add package FoxRedbook
+```
 
 - **WiggleEngine** cross-read verification with automatic jitter correction, dropped/duplicated byte detection, and scratch repair via re-reads
 - **AccurateRip v1/v2** checksum computation — verified against the community database
@@ -79,9 +89,18 @@ if (offset is int samples)
 }
 ```
 
-## FoxOrangebook — CD-R/CD-RW Burning
+---
+
+## <img src="assets/foxorangebook.png" width="32" height="32" align="top"/> FoxOrangebook — CD-R/CD-RW Burning
 
 Disc-At-Once audio CD burning. Named for the [Orange Book](https://en.wikipedia.org/wiki/Orange_Book_(CD_standard)) specification that defines CD-R and CD-RW.
+
+[![NuGet](https://img.shields.io/nuget/v/FoxOrangebook.svg)](https://www.nuget.org/packages/FoxOrangebook)
+[![NuGet Downloads](https://img.shields.io/nuget/dt/FoxOrangebook.svg)](https://www.nuget.org/packages/FoxOrangebook)
+
+```
+dotnet add package FoxOrangebook
+```
 
 - **Disc-At-Once** (DAO) burning — the whole disc in one pass, no inter-track gaps or run-out blocks
 - **Cue sheet** pre-programming per MMC-6
@@ -124,8 +143,10 @@ using var transport = new FileBackedBurnTransport("output.bin")
 
 var session = new BurnSession(transport);
 await session.BurnAsync(tracks);
-// Produces output.bin + output.cue — playable in foobar2000, VLC, etc.
+// Produces output.bin + output.cue — playable in foobar2000
 ```
+
+---
 
 ## Building
 
