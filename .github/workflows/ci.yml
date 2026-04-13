@@ -67,7 +67,8 @@ jobs:
     needs: pack
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment: nuget
+    permissions:
+      id-token: write
     steps:
       - name: Download package
         uses: actions/download-artifact@v4
@@ -86,5 +87,11 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
+      - name: NuGet login
+        id: login
+        uses: NuGet/login@v1
+        with:
+          user: FoxCouncil
+
       - name: Push to NuGet
-        run: dotnet nuget push ./artifacts/*.nupkg --api-key ${{ secrets.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
+        run: dotnet nuget push ./artifacts/*.nupkg --api-key ${{ steps.login.outputs.NUGET_API_KEY }} --source https://api.nuget.org/v3/index.json --skip-duplicate
