@@ -96,10 +96,15 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 
         _daSession = new SafeCFTypeRefHandle(sessionPtr);
 
-        IntPtr runLoop = DiskArbitrationNative.CFRunLoopGetCurrent();
-        IntPtr defaultMode = DiskArbitrationNative.GetCFRunLoopDefaultMode();
-
-        DiskArbitrationNative.DASessionScheduleWithRunLoop(sessionPtr, runLoop, defaultMode);
+        // Route DA callbacks to a libdispatch global queue rather than the calling
+        // thread's CFRunLoop. The legacy run-loop path deadlocks when this code is
+        // invoked from inside a host that already owns the main CFRunLoop (Avalonia,
+        // any Cocoa app): the unmount callback never gets dispatched because the
+        // outer run loop is in a mode that doesn't service our DA source. The dispatch
+        // queue path is independent of the caller's thread and works in any host.
+        IntPtr daQueue = DiskArbitrationNative.dispatch_get_global_queue(
+            DiskArbitrationNative.DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+        DiskArbitrationNative.DASessionSetDispatchQueue(sessionPtr, daQueue);
 
         try
         {
@@ -116,7 +121,7 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 
             // Unmount the virtual filesystem view. Non-destructive: only the
             // filesystem layer detaches; the disc stays in the drive.
-            UnmountDisk(diskPtr, remount: false);
+            UnmountDisk(diskPtr, _bsdName, remount: false);
 
             // Phase 2: IOKit service discovery from the BSD name.
             IntPtr servicePtr = FindIoService(_bsdName);
@@ -142,7 +147,7 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
             }
 
             _daDisk?.Dispose();
-            DiskArbitrationNative.DASessionUnscheduleFromRunLoop(sessionPtr, runLoop, defaultMode);
+            DiskArbitrationNative.DASessionSetDispatchQueue(sessionPtr, IntPtr.Zero);
             _daSession.Dispose();
             throw;
         }
@@ -290,10 +295,9 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 
         if (_daSession is not null && !_daSession.IsInvalid)
         {
-            IntPtr runLoop = DiskArbitrationNative.CFRunLoopGetCurrent();
-            IntPtr defaultMode = DiskArbitrationNative.GetCFRunLoopDefaultMode();
-            DiskArbitrationNative.DASessionUnscheduleFromRunLoop(
-                _daSession.DangerousGetHandle(), runLoop, defaultMode);
+            // Detach the dispatch queue before releasing the session — pairs with
+            // the DASessionSetDispatchQueue call in the constructor.
+            DiskArbitrationNative.DASessionSetDispatchQueue(_daSession.DangerousGetHandle(), IntPtr.Zero);
         }
 
         _daSession?.Dispose();
@@ -308,12 +312,22 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 
     // ── DiskArbitration unmount / remount ──────────────────────
 
-    private static void UnmountDisk(IntPtr diskPtr, bool remount)
+    // DA returns kDAReturnNotPrivileged (0xF8DA0009) when an unprivileged user
+    // tries to unmount media auto-mounted by launchd (the common case for an
+    // audio CD inserted while the app is running). diskutil(8) has a setuid-root
+    // helper that handles exactly this case, so we fall back to shelling out.
+    private const uint kDAReturnNotPrivileged = 0xF8DA0009;
+
+    private static void UnmountDisk(IntPtr diskPtr, string bsdName, bool remount)
     {
-        // Pin a managed delegate for the callback. The delegate captures
-        // local state via the context pointer (a GCHandle.ToIntPtr of a
-        // state object).
+        // Callback fires on the libdispatch worker thread the session was bound to.
+        // We wait on a ManualResetEventSlim rather than spinning a CFRunLoop, so this
+        // method works from any caller — including hosts whose main thread already
+        // owns a run loop (Avalonia/Cocoa). The callback delegate captures local
+        // state via a GCHandle.ToIntPtr context.
         var state = new DACallbackState();
+        var done = new ManualResetEventSlim(initialState: false);
+        state.Signal = done;
         GCHandle stateHandle = GCHandle.Alloc(state);
 
         try
@@ -344,21 +358,15 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
                     GCHandle.ToIntPtr(stateHandle));
             }
 
-            IntPtr defaultMode = DiskArbitrationNative.GetCFRunLoopDefaultMode();
+            bool completed = done.Wait(TimeSpan.FromSeconds(UnmountTimeoutSeconds));
 
-            int rc = DiskArbitrationNative.CFRunLoopRunInMode(
-                defaultMode,
-                UnmountTimeoutSeconds,
-                returnAfterSourceHandled: false);
-
-            // Force the JIT to treat `callback` as live across the unmanaged
-            // call so the delegate isn't GC'd out from under the native code
-            // while the run loop is still dispatching events. "The local is
-            // in scope" is not the same as "the GC sees it as reachable" —
-            // GC.KeepAlive is the documented pattern for exactly this case.
+            // Keep the delegate reachable until after libdispatch has finished
+            // delivering callbacks for this request. "The local is in scope" is not
+            // equivalent to "the GC sees it as reachable across the unmanaged
+            // boundary" — GC.KeepAlive is the documented pattern.
             GC.KeepAlive(callback);
 
-            if (!state.Completed)
+            if (!completed)
             {
                 throw new OpticalDriveException(
                     remount
@@ -368,6 +376,12 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 
             if (!state.Succeeded)
             {
+                if (state.DissenterStatus == kDAReturnNotPrivileged
+                    && TryDiskutilFallback(bsdName, remount))
+                {
+                    return;
+                }
+
                 throw new OpticalDriveException(
                     remount
                         ? $"DADiskMount failed: {state.DissenterMessage ?? "unknown error"}."
@@ -378,14 +392,51 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
         finally
         {
             stateHandle.Free();
+            done.Dispose();
         }
+    }
+
+    private static bool TryDiskutilFallback(string bsdName, bool remount)
+    {
+        try
+        {
+            using var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "/usr/sbin/diskutil",
+                ArgumentList = { remount ? "mount" : "unmount", bsdName },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (p is null || !p.WaitForExit((int)TimeSpan.FromSeconds(UnmountTimeoutSeconds).TotalMilliseconds) || p.ExitCode != 0)
+            {
+                return false;
+            }
+
+            // diskutil unmount detaches cddafs, which triggers a brief IOKit
+            // re-publish cycle on the partition scheme. If we race ahead to
+            // IOBSDNameMatching + IORegistryEntryGetParentEntry while that's
+            // still settling, the IOService handle we get back is stale and
+            // IOCreatePlugInInterfaceForService later returns kIOReturnUnsupported.
+            // Wait for the tree to quiesce. 250ms is empirically sufficient on
+            // an Apple Silicon Mac with a Pioneer BD-RW.
+            System.Threading.Thread.Sleep(250);
+            return true;
+        }
+#pragma warning disable CA1031 // Fallback is best-effort: any failure means we report the original DA error.
+        catch
+        {
+            return false;
+        }
+#pragma warning restore CA1031
     }
 
     private void TryRemount()
     {
         try
         {
-            UnmountDisk(_daDisk.DangerousGetHandle(), remount: true);
+            UnmountDisk(_daDisk.DangerousGetHandle(), _bsdName, remount: true);
         }
 #pragma warning disable CA1031 // Best-effort remount — if it fails, the disc is simply left unmounted
         catch
@@ -406,10 +457,11 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
         }
         else
         {
+            state.DissenterStatus = DiskArbitrationNative.DADissenterGetStatus(dissenter);
             state.DissenterMessage = GetDissenterMessage(dissenter);
         }
 
-        DiskArbitrationNative.CFRunLoopStop(DiskArbitrationNative.CFRunLoopGetCurrent());
+        state.Signal?.Set();
     }
 
     private static unsafe string GetDissenterMessage(IntPtr dissenter)
@@ -457,6 +509,8 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
         public bool Completed;
         public bool Succeeded;
         public string? DissenterMessage;
+        public uint DissenterStatus;
+        public ManualResetEventSlim? Signal;
     }
 
     // ── IOKit service discovery ────────────────────────────────
@@ -601,16 +655,33 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
         IntPtr pluginTypeUuid = CreateCFUUID(IoKitNative.kIOMMCDeviceUserClientTypeID);
         IntPtr interfaceTypeUuid = CreateCFUUID(IoKitNative.kIOCFPlugInInterfaceID);
 
-        IntPtr plugInInterface;
+        IntPtr plugInInterface = IntPtr.Zero;
 
         try
         {
-            int rc = IoKitNative.IOCreatePlugInInterfaceForService(
-                service,
-                pluginTypeUuid,
-                interfaceTypeUuid,
-                out plugInInterface,
-                out int _);
+            // When DA's unmount fails and we fell back to diskutil(8), macOS auto-mount
+            // races to re-claim the disc. The window during which Finder is re-grabbing
+            // SCSITaskUserClient via SCSITaskUserClientIniter (we can see the matched
+            // category in ioreg) makes IOCreatePlugInInterfaceForService return
+            // kIOReturnUnsupported transiently. Retrying with brief backoff catches the
+            // moment between automount publishing the IOMedia and Finder's match win.
+            int rc = 0;
+            for (int attempt = 0; attempt < 8; attempt++)
+            {
+                rc = IoKitNative.IOCreatePlugInInterfaceForService(
+                    service,
+                    pluginTypeUuid,
+                    interfaceTypeUuid,
+                    out plugInInterface,
+                    out int _);
+
+                if (rc == 0 && plugInInterface != IntPtr.Zero)
+                {
+                    break;
+                }
+
+                System.Threading.Thread.Sleep(150);
+            }
 
             if (rc != 0 || plugInInterface == IntPtr.Zero)
             {

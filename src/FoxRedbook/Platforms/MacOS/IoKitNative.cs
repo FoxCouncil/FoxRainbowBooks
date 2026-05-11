@@ -195,6 +195,14 @@ internal static partial class IoKitNative
     [return: MarshalAs(UnmanagedType.I1)]
     internal static partial bool IOObjectConformsTo(IntPtr ioObject, string className);
 
+    /// <summary>
+    /// Fills <paramref name="className"/> with the C-string class name of an
+    /// IOKit object (e.g. <c>"IOCDMedia"</c>). The buffer must be at least
+    /// 128 bytes per IOKit/IOTypes.h <c>io_name_t</c>.
+    /// </summary>
+    [LibraryImport(IOKitFramework, EntryPoint = "IOObjectGetClass")]
+    internal static unsafe partial int IOObjectGetClass(IntPtr ioObject, byte* className);
+
     /// <summary>IOService plane name for IORegistry traversal.</summary>
     internal const string kIOServicePlane = "IOService";
 

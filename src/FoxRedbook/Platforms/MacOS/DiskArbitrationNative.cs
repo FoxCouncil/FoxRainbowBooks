@@ -36,6 +36,12 @@ internal static partial class DiskArbitrationNative
     private const string CoreFoundationFramework =
         "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
 
+    // libdispatch ships in libSystem.dylib on macOS — same library libc resolves to.
+    private const string LibSystem = "/usr/lib/libSystem.dylib";
+
+    /// <summary><c>DISPATCH_QUEUE_PRIORITY_DEFAULT</c> for use with <see cref="dispatch_get_global_queue"/>.</summary>
+    internal const long DISPATCH_QUEUE_PRIORITY_DEFAULT = 0;
+
     /// <summary><c>kDADiskUnmountOptionDefault</c> = 0.</summary>
     internal const uint kDADiskUnmountOptionDefault = 0;
 
@@ -66,13 +72,23 @@ internal static partial class DiskArbitrationNative
     [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionCreate")]
     internal static partial IntPtr DASessionCreate(IntPtr allocator);
 
-    /// <summary>Schedules a DA session on a run loop in the given mode.</summary>
-    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionScheduleWithRunLoop")]
-    internal static partial void DASessionScheduleWithRunLoop(IntPtr session, IntPtr runLoop, IntPtr runLoopMode);
+    /// <summary>
+    /// Routes DA callbacks to a libdispatch queue. Preferred over the legacy
+    /// <c>DASessionScheduleWithRunLoop</c> path: callback delivery doesn't depend
+    /// on the caller pumping a CFRunLoop, so it survives being invoked from
+    /// inside hosts that own the main run loop (Avalonia, Cocoa apps, etc.).
+    /// Pass <see cref="IntPtr.Zero"/> to detach.
+    /// </summary>
+    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionSetDispatchQueue")]
+    internal static partial void DASessionSetDispatchQueue(IntPtr session, IntPtr queue);
 
-    /// <summary>Removes a DA session from a run loop.</summary>
-    [LibraryImport(DiskArbitrationFramework, EntryPoint = "DASessionUnscheduleFromRunLoop")]
-    internal static partial void DASessionUnscheduleFromRunLoop(IntPtr session, IntPtr runLoop, IntPtr runLoopMode);
+    /// <summary>
+    /// Returns a global libdispatch concurrent queue. We use the default-priority
+    /// global queue so DA callbacks fire on a worker thread libdispatch owns,
+    /// independent of the caller's thread.
+    /// </summary>
+    [LibraryImport(LibSystem, EntryPoint = "dispatch_get_global_queue")]
+    internal static partial IntPtr dispatch_get_global_queue(long identifier, ulong flags);
 
     /// <summary>
     /// Creates a DADiskRef for a given BSD name (e.g., "disk1"). The
