@@ -20,10 +20,21 @@ internal static class BurnCommands
     internal const byte OpCloseTrackSession = 0x5B;
     internal const byte OpBlank = 0xA1;
     internal const byte OpSendOpc = 0x54;
+    internal const byte OpTestUnitReady = 0x00;
+    internal const byte OpSynchronizeCache = 0x35;
+    internal const byte OpFormatUnit = 0x04;
+    internal const byte OpReadFormatCapacities = 0x23;
 
     // ── Feature numbers ──────────────────────────────────────
 
     internal const ushort FeatureCdMastering = 0x002F;
+    internal const ushort FeatureCdTrackAtOnce = 0x002D;
+
+    // ── Current media profiles (GET CONFIGURATION header) ────────
+
+    internal const ushort ProfileCdR = 0x0009;
+    internal const ushort ProfileCdRw = 0x000A;
+    internal const ushort ProfileDvdPlusRw = 0x001A;
 
     // ── GET CONFIGURATION (0x46) ─────────────────────────────
 
@@ -63,6 +74,29 @@ internal static class BurnCommands
 
         ushort code = BinaryPrimitives.ReadUInt16BigEndian(response.Slice(8, 2));
         return code == featureNumber;
+    }
+
+    /// <summary>
+    /// Builds a GET CONFIGURATION (RT=1) request that returns the feature
+    /// header, whose Current Profile field identifies the loaded media.
+    /// </summary>
+    internal static void BuildGetConfigurationHeader(Span<byte> cdb, int allocationLength)
+    {
+        if (cdb.Length < 10)
+        {
+            throw new ArgumentException("GET CONFIGURATION CDB must be at least 10 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpGetConfiguration;
+        cdb[1] = 0x01; // RT = 1 (current features)
+        BinaryPrimitives.WriteUInt16BigEndian(cdb.Slice(7, 2), (ushort)allocationLength);
+    }
+
+    /// <summary>Reads the Current Profile field (bytes 6–7) from a GET CONFIGURATION response.</summary>
+    internal static ushort ParseCurrentProfile(ReadOnlySpan<byte> response)
+    {
+        return response.Length < 8 ? (ushort)0 : BinaryPrimitives.ReadUInt16BigEndian(response.Slice(6, 2));
     }
 
     // ── READ DISC INFORMATION (0x51) ─────────────────────────
@@ -180,6 +214,50 @@ internal static class BurnCommands
         return totalLength;
     }
 
+    /// <summary>
+    /// Builds the MODE SELECT parameter list with Write Parameters page 0x05
+    /// configured for Track-At-Once Mode 1 (2048-byte) data burning.
+    /// </summary>
+    /// <param name="buffer">Output buffer for the mode parameter header + page. Must be at least 60 bytes.</param>
+    /// <param name="testWrite">If true, enables simulation mode (no actual burn).</param>
+    /// <param name="bufferUnderrunProtection">If true, enables BUFE.</param>
+    /// <returns>Number of bytes written to <paramref name="buffer"/>.</returns>
+    internal static int BuildDataWriteParametersPage(Span<byte> buffer, bool testWrite, bool bufferUnderrunProtection)
+    {
+        const int totalLength = 8 + 2 + WriteParametersPageLength;
+
+        if (buffer.Length < totalLength)
+        {
+            throw new ArgumentException($"Buffer must be at least {totalLength} bytes.", nameof(buffer));
+        }
+
+        buffer.Slice(0, totalLength).Clear();
+
+        int page = 8;
+        buffer[page] = WriteParametersPageCode;
+        buffer[page + 1] = WriteParametersPageLength;
+
+        byte writeType = 0x01; // Track-At-Once
+        byte flags = writeType;
+
+        if (testWrite)
+        {
+            flags |= 0x10;
+        }
+
+        if (bufferUnderrunProtection)
+        {
+            flags |= 0x40;
+        }
+
+        buffer[page + 2] = flags;
+        buffer[page + 3] = 0x04; // Track mode: data track (control bit 2 set)
+        buffer[page + 4] = 0x08; // Data block type: Mode 1, 2048 user bytes
+        buffer[page + 14] = 0x00; // Session format: CD-ROM data
+
+        return totalLength;
+    }
+
     // ── SEND CUE SHEET (0x5D) ────────────────────────────────
 
     internal const int CueSheetEntrySize = 8;
@@ -274,6 +352,120 @@ internal static class BurnCommands
         }
 
         cdb[1] = flags;
+    }
+
+    // ── READ FORMAT CAPACITIES (0x23) ────────────────────────
+
+    internal static void BuildReadFormatCapacities(Span<byte> cdb, int allocationLength)
+    {
+        if (cdb.Length < 12)
+        {
+            throw new ArgumentException("READ FORMAT CAPACITIES CDB must be at least 12 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpReadFormatCapacities;
+        BinaryPrimitives.WriteUInt16BigEndian(cdb.Slice(7, 2), (ushort)allocationLength);
+    }
+
+    /// <summary>DVD+RW background-format descriptor type.</summary>
+    internal const byte FormatTypeDvdPlusRwBackground = 0x26;
+
+    /// <summary>
+    /// Parses a READ FORMAT CAPACITIES response: whether the current media is
+    /// already formatted, and the block count of the preferred (background)
+    /// formattable descriptor for re-formatting.
+    /// </summary>
+    internal static (bool Formatted, uint FormatBlocks) ParseFormatCapacities(ReadOnlySpan<byte> response)
+    {
+        if (response.Length < 12)
+        {
+            return (false, 0);
+        }
+
+        int listLength = response[3];
+        int currentType = response[8] & 0x03; // 2 = formatted, 1 = unformatted
+        bool formatted = currentType == 2;
+        uint blocks = BinaryPrimitives.ReadUInt32BigEndian(response.Slice(4, 4));
+
+        for (int q = 12; q + 8 <= 4 + listLength && q + 8 <= response.Length; q += 8)
+        {
+            int formatType = response[q + 4] >> 2;
+
+            if (formatType == FormatTypeDvdPlusRwBackground)
+            {
+                blocks = BinaryPrimitives.ReadUInt32BigEndian(response.Slice(q, 4));
+                break;
+            }
+        }
+
+        return (formatted, blocks);
+    }
+
+    // ── FORMAT UNIT (0x04) ───────────────────────────────────
+
+    internal static void BuildFormatUnit(Span<byte> cdb)
+    {
+        if (cdb.Length < 6)
+        {
+            throw new ArgumentException("FORMAT UNIT CDB must be at least 6 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpFormatUnit;
+        cdb[1] = 0x11; // FmtData = 1, defect list format = 001
+    }
+
+    /// <summary>
+    /// Builds the FORMAT UNIT parameter list for a DVD+RW background format
+    /// (format type 0x26) covering <paramref name="blocks"/> logical blocks.
+    /// </summary>
+    /// <returns>Number of bytes written (always 12).</returns>
+    internal static int BuildDvdPlusRwFormatParameters(Span<byte> buffer, uint blocks, bool immediate)
+    {
+        if (buffer.Length < 12)
+        {
+            throw new ArgumentException("Format parameter list buffer must be at least 12 bytes.", nameof(buffer));
+        }
+
+        buffer.Slice(0, 12).Clear();
+
+        if (immediate)
+        {
+            buffer[1] = 0x02; // IMMED — format in the background, return immediately
+        }
+
+        buffer[3] = 0x08; // format descriptor length
+        BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(4, 4), blocks);
+        buffer[8] = FormatTypeDvdPlusRwBackground << 2;
+
+        return 12;
+    }
+
+    // ── TEST UNIT READY (0x00) ───────────────────────────────
+
+    internal static void BuildTestUnitReady(Span<byte> cdb)
+    {
+        if (cdb.Length < 6)
+        {
+            throw new ArgumentException("TEST UNIT READY CDB must be at least 6 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpTestUnitReady;
+    }
+
+    // ── SYNCHRONIZE CACHE (0x35) ─────────────────────────────
+
+    internal static void BuildSynchronizeCache(Span<byte> cdb)
+    {
+        if (cdb.Length < 10)
+        {
+            throw new ArgumentException("SYNCHRONIZE CACHE CDB must be at least 10 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpSynchronizeCache;
     }
 
     // ── SEND OPC INFORMATION (0x54) ──────────────────────────
