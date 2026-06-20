@@ -187,13 +187,13 @@ public sealed class BurnSessionTests
             new() { Pcm = new MemoryStream(new byte[2352 * 100]) },
         };
 
-        var reports = new List<BurnProgress>();
+        var progress = new SyncProgress<BurnProgress>();
 
-        await session.BurnAsync(tracks, new Progress<BurnProgress>(p => reports.Add(p)));
+        await session.BurnAsync(tracks, progress);
 
-        Assert.NotEmpty(reports);
-        Assert.Equal(100, reports[^1].SectorsWritten);
-        Assert.Equal(100, reports[^1].TotalSectorsWritten);
+        Assert.NotEmpty(progress.Reports);
+        Assert.Equal(100, progress.Reports[^1].SectorsWritten);
+        Assert.Equal(100, progress.Reports[^1].TotalSectorsWritten);
     }
 
     [Fact]
@@ -212,6 +212,15 @@ public sealed class BurnSessionTests
 
         await Assert.ThrowsAsync<OperationCanceledException>(
             () => session.BurnAsync(tracks, cancellationToken: cts.Token));
+    }
+
+    // ── Test helpers ─────────────────────────────────────────
+
+    private sealed class SyncProgress<T> : IProgress<T>
+    {
+        public List<T> Reports { get; } = new();
+
+        public void Report(T value) => Reports.Add(value);
     }
 
     // ── Mock transport ───────────────────────────────────────
