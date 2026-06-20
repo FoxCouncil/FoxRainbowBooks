@@ -22,7 +22,6 @@
   </ItemGroup>
 
   <PropertyGroup>
-    <Version>1.0.0-alpha.2</Version>
     <Authors>Fox</Authors>
     <Company>FoxCouncil</Company>
     <Copyright>Copyright © FoxCouncil $([System.DateTime]::Now.Year)</Copyright>

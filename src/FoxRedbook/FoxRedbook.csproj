@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
+    <Version>1.0.0-alpha.2</Version>
     <!-- Required by LibraryImport source generator for unsafe pointer marshalling. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Bit-perfect audio CD ripping with AccurateRip verification, cross-read jitter correction, and embedded drive offset database</Description>
