@@ -18,6 +18,8 @@ public sealed class FileBackedBurnTransport : IScsiTransport
     private readonly string _cuePath;
     private FileStream? _binStream;
     private readonly List<CueSheetEntry> _cueEntries = new();
+    private readonly MemoryStream _cdTextLeadIn = new();
+    private bool _cdTextCueRequested;
     private bool _closed;
     private bool _disposed;
 
@@ -43,6 +45,22 @@ public sealed class FileBackedBurnTransport : IScsiTransport
     /// (element 0 = track 1). Set before calling <see cref="BurnSession.BurnAsync"/>.
     /// </summary>
     public IReadOnlyList<(string? Title, string? Performer)> TrackMetadata { get; set; } = Array.Empty<(string?, string?)>();
+
+    /// <summary>
+    /// Size of the simulated CD-TEXT lead-in region in 96-byte sectors.
+    /// When a cue sheet requests CD-TEXT in the lead-in, the transport
+    /// reports a Next Writable Address of -150 minus this value. Real
+    /// media lead-ins run to thousands of sectors; the default keeps
+    /// simulated output small.
+    /// </summary>
+    public int CdTextLeadInSectors { get; init; } = 75;
+
+    /// <summary>
+    /// Raw 6-bit subchannel data captured from lead-in writes (LBA below
+    /// -150) — the CD-TEXT pack stream as the drive would receive it.
+    /// Empty when the burn carried no CD-TEXT. Not part of the .bin file.
+    /// </summary>
+    public ReadOnlyMemory<byte> CdTextLeadInData => _cdTextLeadIn.ToArray();
 
     /// <inheritdoc />
     public DriveInquiry Inquiry => new()
@@ -70,6 +88,12 @@ public sealed class FileBackedBurnTransport : IScsiTransport
             case BurnCommands.OpReadDiscInformation:
             {
                 HandleReadDiscInformation(buffer);
+                break;
+            }
+
+            case BurnCommands.OpReadTrackInformation:
+            {
+                HandleReadTrackInformation(buffer);
                 break;
             }
 
@@ -117,6 +141,7 @@ public sealed class FileBackedBurnTransport : IScsiTransport
             }
 
             _binStream?.Dispose();
+            _cdTextLeadIn.Dispose();
             _disposed = true;
         }
     }
@@ -146,12 +171,34 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         {
             buffer.Clear();
             buffer[2] = 0x00; // Blank disc
+
+            // Last Possible Lead-Out Start Address: model an 80-minute
+            // blank (79:59:74 ≈ 359,849 program sectors).
+            buffer[21] = 79;
+            buffer[22] = 59;
+            buffer[23] = 74;
+        }
+    }
+
+    private void HandleReadTrackInformation(Span<byte> buffer)
+    {
+        if (buffer.Length >= 16)
+        {
+            buffer.Clear();
+            buffer[7] = 0x01; // NWA valid
+
+            // With CD-TEXT in the cue sheet, the next writable address is
+            // the start of the simulated lead-in; otherwise the program
+            // area begins directly at track 1's pregap.
+            int nwa = _cdTextCueRequested ? -150 - CdTextLeadInSectors : -150;
+            BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(12, 4), unchecked((uint)nwa));
         }
     }
 
     private void HandleSendCueSheet(ReadOnlySpan<byte> data)
     {
         _cueEntries.Clear();
+        _cdTextCueRequested = false;
 
         int entryCount = data.Length / BurnCommands.CueSheetEntrySize;
 
@@ -159,7 +206,7 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         {
             int offset = i * BurnCommands.CueSheetEntrySize;
 
-            _cueEntries.Add(new CueSheetEntry
+            var entry = new CueSheetEntry
             {
                 CtlAdr = data[offset],
                 TrackNumber = data[offset + 1],
@@ -169,13 +216,34 @@ public sealed class FileBackedBurnTransport : IScsiTransport
                 Minute = data[offset + 5],
                 Second = data[offset + 6],
                 Frame = data[offset + 7],
-            });
+            };
+
+            if (entry.TrackNumber == CueSheetEntry.LeadInTrack && (entry.DataForm & 0x40) != 0)
+            {
+                _cdTextCueRequested = true;
+            }
+
+            _cueEntries.Add(entry);
         }
     }
 
     private void HandleWrite(ReadOnlySpan<byte> cdb, ReadOnlySpan<byte> data)
     {
+        int lba = unchecked((int)BinaryPrimitives.ReadUInt32BigEndian(cdb.Slice(2, 4)));
+
+        if (lba < -150)
+        {
+            // CD-TEXT lead-in sectors (96 bytes of 6-bit subchannel data
+            // each) — captured separately, not part of the .bin file.
+            _cdTextLeadIn.Write(data);
+            return;
+        }
+
+        // Program area writes start at LBA -150 (track 1's pregap), which
+        // maps to file offset 0 so the .bin models the full program area.
         _binStream ??= new FileStream(_binPath, FileMode.Create, FileAccess.Write);
+        long offset64 = (lba + 150L) * CdConstants.SectorSize;
+        _binStream.Seek(offset64, SeekOrigin.Begin);
         _binStream.Write(data);
     }
 

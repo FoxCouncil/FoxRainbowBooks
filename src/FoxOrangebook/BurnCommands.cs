@@ -24,6 +24,9 @@ internal static class BurnCommands
     internal const byte OpSynchronizeCache = 0x35;
     internal const byte OpFormatUnit = 0x04;
     internal const byte OpReadFormatCapacities = 0x23;
+    internal const byte OpStartStopUnit = 0x1B;
+    internal const byte OpReadTrackInformation = 0x52;
+    internal const byte OpSetCdSpeed = 0xBB;
 
     // ── Feature numbers ──────────────────────────────────────
 
@@ -130,7 +133,33 @@ internal static class BurnCommands
             Erasable = (statusByte & 0x10) != 0,
             FirstTrack = response[3],
             LastTrack = response[6],
+            CapacitySectors = ParseLastPossibleLeadOut(response),
         };
+    }
+
+    /// <summary>
+    /// Extracts the writable capacity in sectors from the Last Possible
+    /// Lead-Out Start Address field (bytes 20–23, binary 00:MM:SS:FF).
+    /// All-0xFF means the drive does not report it. The 150-sector
+    /// mandatory pregap is subtracted so the result is usable program
+    /// area from LBA 0.
+    /// </summary>
+    private static long? ParseLastPossibleLeadOut(ReadOnlySpan<byte> response)
+    {
+        byte mm = response[21];
+        byte ss = response[22];
+        byte ff = response[23];
+
+        if (mm == 0xFF && ss == 0xFF && ff == 0xFF)
+        {
+            return null;
+        }
+
+        long sectors = ((mm * 60L) + ss) * 75 + ff - 150;
+
+        // A zeroed or nonsensical field (e.g. from a drive that fills the
+        // response with zeros instead of 0xFF) would yield a negative value.
+        return sectors < 0 ? null : sectors;
     }
 
     // ── MODE SENSE / MODE SELECT — Write Parameters page 0x05 ─
@@ -280,12 +309,23 @@ internal static class BurnCommands
     /// <summary>
     /// Serializes an array of cue sheet entries into a contiguous byte buffer.
     /// </summary>
+    /// <exception cref="ArgumentException">
+    /// An entry has a track number above 99 that is not the lead-out marker —
+    /// Red Book limits discs to tracks 1–99.
+    /// </exception>
     internal static byte[] SerializeCueSheet(IReadOnlyList<CueSheetEntry> entries)
     {
         byte[] data = new byte[entries.Count * CueSheetEntrySize];
 
         for (int i = 0; i < entries.Count; i++)
         {
+            byte trackNumber = entries[i].TrackNumber;
+
+            if (trackNumber > 99 && trackNumber != CueSheetEntry.LeadOutTrack)
+            {
+                throw new ArgumentException($"Cue sheet entry {i} has track number {trackNumber}; Red Book allows tracks 1-99.", nameof(entries));
+            }
+
             entries[i].WriteTo(data.AsSpan(i * CueSheetEntrySize, CueSheetEntrySize));
         }
 
@@ -440,6 +480,94 @@ internal static class BurnCommands
         buffer[8] = FormatTypeDvdPlusRwBackground << 2;
 
         return 12;
+    }
+
+    // ── START STOP UNIT (0x1B) ───────────────────────────────
+
+    internal static void BuildStartStopUnit(Span<byte> cdb, bool loadEject, bool start)
+    {
+        if (cdb.Length < 6)
+        {
+            throw new ArgumentException("START STOP UNIT CDB must be at least 6 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpStartStopUnit;
+
+        byte flags = 0;
+
+        if (start)
+        {
+            flags |= 0x01;
+        }
+
+        if (loadEject)
+        {
+            flags |= 0x02;
+        }
+
+        cdb[4] = flags;
+    }
+
+    // ── SET CD SPEED (0xBB) ──────────────────────────────────
+
+    /// <summary>1x audio speed in kB/s (75 sectors × 2,352 bytes ≈ 176 kB).</summary>
+    internal const ushort OneXAudioKBps = 176;
+
+    /// <summary>Speed value meaning "maximum the drive supports".</summary>
+    internal const ushort MaxSpeed = 0xFFFF;
+
+    internal static void BuildSetCdSpeed(Span<byte> cdb, ushort readKBps, ushort writeKBps)
+    {
+        if (cdb.Length < 12)
+        {
+            throw new ArgumentException("SET CD SPEED CDB must be at least 12 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpSetCdSpeed;
+        BinaryPrimitives.WriteUInt16BigEndian(cdb.Slice(2, 2), readKBps);
+        BinaryPrimitives.WriteUInt16BigEndian(cdb.Slice(4, 2), writeKBps);
+    }
+
+    // ── READ TRACK INFORMATION (0x52) ────────────────────────
+
+    internal const int ReadTrackInfoResponseLength = 36;
+
+    internal static void BuildReadTrackInformation(Span<byte> cdb, uint trackNumber)
+    {
+        if (cdb.Length < 10)
+        {
+            throw new ArgumentException("READ TRACK INFORMATION CDB must be at least 10 bytes.", nameof(cdb));
+        }
+
+        cdb.Clear();
+        cdb[0] = OpReadTrackInformation;
+        cdb[1] = 0x01; // address/number type: logical track number
+        BinaryPrimitives.WriteUInt32BigEndian(cdb.Slice(2, 4), trackNumber);
+        BinaryPrimitives.WriteUInt16BigEndian(cdb.Slice(7, 2), ReadTrackInfoResponseLength);
+    }
+
+    /// <summary>
+    /// Extracts the Next Writable Address (bytes 12–15, signed) from a
+    /// READ TRACK INFORMATION response. Returns null when the NWA_V bit
+    /// (byte 7, bit 0) is clear or the response is too short. After a
+    /// SEND CUE SHEET whose lead-in carries CD-TEXT, the NWA is the
+    /// negative LBA where the host must start streaming text sectors.
+    /// </summary>
+    internal static int? ParseNextWritableAddress(ReadOnlySpan<byte> response)
+    {
+        if (response.Length < 16)
+        {
+            return null;
+        }
+
+        if ((response[7] & 0x01) == 0)
+        {
+            return null;
+        }
+
+        return unchecked((int)BinaryPrimitives.ReadUInt32BigEndian(response.Slice(12, 4)));
     }
 
     // ── TEST UNIT READY (0x00) ───────────────────────────────

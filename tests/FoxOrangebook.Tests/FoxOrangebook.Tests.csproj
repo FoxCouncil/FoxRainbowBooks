@@ -3,7 +3,7 @@
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsAotCompatible>false</IsAotCompatible>
-    <NoWarn>CA1515;CA1707;CA1849;CA2000</NoWarn>
+    <NoWarn>CA1515;CA1707;CA1849;CA1861;CA2000</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

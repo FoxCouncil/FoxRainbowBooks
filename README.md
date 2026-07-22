@@ -107,7 +107,9 @@ dotnet add package FoxOrangebook
 - **Buffer underrun protection** (BURN-Free / SafeBurn)
 - **CD-RW blanking** (full and minimal)
 - **File-backed transport** — "burn" to a .bin/.cue file pair for testing or archival without touching hardware
-- **Track metadata** — title and performer per track, written to cue sheet (CD-Text burn support planned)
+- **Track metadata** — title and performer per track, written to cue sheet
+- **CD-Text** — disc and track title/performer burned into the lead-in (Latin-1; falls back to a plain burn if the drive rejects the CD-Text cue sheet)
+- **Disc capacity, eject, write speed** — capacity from READ DISC INFORMATION, `Eject()` after the burn, `WriteSpeedKBps` burn option
 
 ### Quick Start — Burning
 

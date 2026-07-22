@@ -78,16 +78,23 @@ public sealed class BurnToFileIntegrationTests : IDisposable
                 DiscPerformer = "Various Artists",
                 TrackMetadata = trackMeta,
             };
-            var session = new BurnSession(transport, new BurnOptions { SectorsPerWrite = 32 });
+            var session = new BurnSession(transport, new BurnOptions
+            {
+                SectorsPerWrite = 32,
+                DiscTitle = "Public Domain Blues",
+                DiscPerformer = "Various Artists",
+            });
 
             var reports = new List<BurnProgress>();
 
             await session.BurnAsync(tracks, new Progress<BurnProgress>(p => reports.Add(p)));
 
-            // Verify bin file exists and has correct total size.
+            // Verify bin file exists and has correct total size: track 1's
+            // 150-sector pregap plus all audio sectors.
             Assert.True(File.Exists(binPath));
 
-            long expectedBytes = tracks.Sum(t => (long)t.SectorCount * CdConstants.SectorSize);
+            long programSectors = 150 + tracks.Sum(t => (long)t.SectorCount);
+            long expectedBytes = programSectors * CdConstants.SectorSize;
             long actualBytes = new FileInfo(binPath).Length;
             Assert.Equal(expectedBytes, actualBytes);
 
@@ -103,12 +110,24 @@ public sealed class BurnToFileIntegrationTests : IDisposable
                 Assert.Contains($"TRACK {i:D2} AUDIO", cue, StringComparison.Ordinal);
             }
 
-            // Verify progress was reported.
+            // Verify progress was reported, covering pregap + audio.
             Assert.NotEmpty(reports);
-            Assert.Equal(expectedBytes / CdConstants.SectorSize, reports[^1].TotalSectorsWritten);
+            Assert.Equal(programSectors, reports[^1].TotalSectorsWritten);
+
+            // The tracks carry titles/performers, so CD-TEXT must have been
+            // streamed into the simulated lead-in and round-trip cleanly.
+            Assert.Equal(transport.CdTextLeadInSectors * 96, transport.CdTextLeadInData.Length);
+
+            byte[] packs = CdTextTestHelpers.CollapseFrom6Bit(transport.CdTextLeadInData.Span);
+            var cdText = CdTextTestHelpers.ParseWithFoxRedbook(CdTextTestHelpers.TakeFirstCycle(packs));
+
+            Assert.NotNull(cdText);
+            Assert.Equal("Public Domain Blues", cdText!.AlbumTitle);
+            Assert.Equal("Various Artists", cdText.AlbumPerformer);
+            Assert.Equal(7, cdText.Tracks.Count);
 
             // Print summary for manual inspection.
-            long totalSeconds = expectedBytes / CdConstants.SectorSize / 75;
+            long totalSeconds = programSectors / 75;
             Console.WriteLine($"Burn complete: {wavFiles.Length} tracks, {actualBytes:N0} bytes, ~{totalSeconds / 60}:{totalSeconds % 60:D2}");
             Console.WriteLine($"BIN: {binPath}");
             Console.WriteLine($"CUE: {cuePath}");

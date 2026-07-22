@@ -17,4 +17,13 @@ public readonly record struct DiscInfo
 
     /// <summary>Number of the last track on the disc.</summary>
     public required byte LastTrack { get; init; }
+
+    /// <summary>
+    /// Writable capacity of the disc in sectors, derived from the Last
+    /// Possible Lead-Out Start Address (READ DISC INFORMATION bytes 20–23)
+    /// with the 150-sector mandatory pregap subtracted. Null when the
+    /// drive does not report the field (all-0xFF). An 80-minute blank
+    /// reports roughly 359,849 sectors.
+    /// </summary>
+    public long? CapacitySectors { get; init; }
 }

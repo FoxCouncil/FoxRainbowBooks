@@ -40,18 +40,32 @@ public readonly record struct CueSheetEntry
     /// <summary>Data form for CD-DA audio.</summary>
     public const byte DataFormAudio = 0x00;
 
+    /// <summary>
+    /// Data form for a lead-in that carries CD-TEXT (0x01 | 0x40). The
+    /// host must stream the text packs into the lead-in area before the
+    /// program data.
+    /// </summary>
+    public const byte DataFormCdTextLeadIn = 0x41;
+
     /// <summary>CTL/ADR for audio with position.</summary>
     public const byte CtlAdrAudio = 0x01;
 
     /// <summary>
     /// Creates a lead-in entry at MSF 00:00:00.
     /// </summary>
-    public static CueSheetEntry LeadIn() => new()
+    public static CueSheetEntry LeadIn() => LeadIn(DataFormAudio);
+
+    /// <summary>
+    /// Creates a lead-in entry at MSF 00:00:00 with the given data form.
+    /// Use <see cref="DataFormCdTextLeadIn"/> when the lead-in will carry
+    /// CD-TEXT packs.
+    /// </summary>
+    public static CueSheetEntry LeadIn(byte dataForm) => new()
     {
         CtlAdr = CtlAdrAudio,
         TrackNumber = LeadInTrack,
         Index = 0x00,
-        DataForm = DataFormAudio,
+        DataForm = dataForm,
         Scms = 0x00,
         Minute = 0,
         Second = 0,

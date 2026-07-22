@@ -101,6 +101,47 @@ public sealed class BurnCommandsTests
         Assert.Throws<ArgumentException>(() => BurnCommands.ParseReadDiscInformation(new byte[10]));
     }
 
+    [Fact]
+    public void ParseReadDiscInformation_CapacityReported_Computed()
+    {
+        // 80-minute blank: Last Possible Lead-Out at 79:59:74.
+        byte[] response = new byte[34];
+        response[21] = 79;
+        response[22] = 59;
+        response[23] = 74;
+
+        var info = BurnCommands.ParseReadDiscInformation(response);
+
+        // ((79*60)+59)*75+74-150 = 359,849
+        Assert.Equal(359_849, info.CapacitySectors);
+    }
+
+    [Fact]
+    public void ParseReadDiscInformation_CapacityAllFF_Null()
+    {
+        byte[] response = new byte[34];
+        response[20] = 0xFF;
+        response[21] = 0xFF;
+        response[22] = 0xFF;
+        response[23] = 0xFF;
+
+        var info = BurnCommands.ParseReadDiscInformation(response);
+
+        Assert.Null(info.CapacitySectors);
+    }
+
+    [Fact]
+    public void ParseReadDiscInformation_CapacityZeroed_Null()
+    {
+        // Drives that fill the field with zeros instead of 0xFF would
+        // otherwise yield -150.
+        byte[] response = new byte[34];
+
+        var info = BurnCommands.ParseReadDiscInformation(response);
+
+        Assert.Null(info.CapacitySectors);
+    }
+
     // ── MODE SENSE / MODE SELECT ─────────────────────────────
 
     [Fact]
@@ -174,6 +215,35 @@ public sealed class BurnCommandsTests
     }
 
     [Fact]
+    public void SerializeCueSheet_TrackNumberAbove99_Throws()
+    {
+        var entries = new List<CueSheetEntry>
+        {
+            CueSheetEntry.LeadIn(),
+            CueSheetEntry.TrackStart(100, 0, 2, 0),
+            CueSheetEntry.LeadOut(5, 30, 0),
+        };
+
+        Assert.Throws<ArgumentException>(() => BurnCommands.SerializeCueSheet(entries));
+    }
+
+    [Fact]
+    public void SerializeCueSheet_LeadOutMarker_Allowed()
+    {
+        // 0xAA is above 99 but is the lead-out marker, not a track.
+        var entries = new List<CueSheetEntry>
+        {
+            CueSheetEntry.LeadIn(),
+            CueSheetEntry.TrackStart(99, 0, 2, 0),
+            CueSheetEntry.LeadOut(5, 30, 0),
+        };
+
+        byte[] data = BurnCommands.SerializeCueSheet(entries);
+
+        Assert.Equal(24, data.Length);
+    }
+
+    [Fact]
     public void SerializeCueSheet_RoundTrips()
     {
         var entries = new List<CueSheetEntry>
@@ -209,6 +279,19 @@ public sealed class BurnCommandsTests
         Assert.Equal(0x34, cdb[5]);
         Assert.Equal(0x00, cdb[7]);
         Assert.Equal(0x19, cdb[8]); // 25
+    }
+
+    [Fact]
+    public void BuildWrite10_NegativeLba_TwosComplement()
+    {
+        // LBA -150 (start of track 1's pregap) = 0xFFFFFF6A.
+        Span<byte> cdb = stackalloc byte[10];
+        BurnCommands.BuildWrite10(cdb, lba: unchecked((uint)-150), sectorCount: 1);
+
+        Assert.Equal(0xFF, cdb[2]);
+        Assert.Equal(0xFF, cdb[3]);
+        Assert.Equal(0xFF, cdb[4]);
+        Assert.Equal(0x6A, cdb[5]);
     }
 
     // ── CLOSE TRACK/SESSION ──────────────────────────────────
@@ -264,6 +347,102 @@ public sealed class BurnCommandsTests
 
         Assert.Equal(0x54, cdb[0]);
         Assert.Equal(0x01, cdb[1]); // DoOPC = 1
+    }
+
+    // ── START STOP UNIT ──────────────────────────────────────
+
+    [Fact]
+    public void BuildStartStopUnit_Eject_ExactByteLayout()
+    {
+        Span<byte> cdb = stackalloc byte[6];
+        BurnCommands.BuildStartStopUnit(cdb, loadEject: true, start: false);
+
+        Assert.Equal(0x1B, cdb[0]);
+        Assert.Equal(0x00, cdb[1]);
+        Assert.Equal(0x02, cdb[4]); // LoEj=1, Start=0
+    }
+
+    [Fact]
+    public void BuildStartStopUnit_Load_SetsBothBits()
+    {
+        Span<byte> cdb = stackalloc byte[6];
+        BurnCommands.BuildStartStopUnit(cdb, loadEject: true, start: true);
+
+        Assert.Equal(0x03, cdb[4]); // LoEj=1, Start=1
+    }
+
+    [Fact]
+    public void BuildStartStopUnit_BufferTooSmall_Throws()
+    {
+        byte[] cdb = new byte[5];
+        Assert.Throws<ArgumentException>(() => BurnCommands.BuildStartStopUnit(cdb, loadEject: true, start: false));
+    }
+
+    // ── SET CD SPEED ─────────────────────────────────────────
+
+    [Fact]
+    public void BuildSetCdSpeed_ExactByteLayout()
+    {
+        Span<byte> cdb = stackalloc byte[12];
+        BurnCommands.BuildSetCdSpeed(cdb, readKBps: 0xFFFF, writeKBps: 706);
+
+        Assert.Equal(0xBB, cdb[0]);
+        Assert.Equal(0xFF, cdb[2]); // read speed high
+        Assert.Equal(0xFF, cdb[3]); // read speed low
+        Assert.Equal(0x02, cdb[4]); // write speed high (706 = 0x02C2)
+        Assert.Equal(0xC2, cdb[5]); // write speed low
+    }
+
+    [Fact]
+    public void BuildSetCdSpeed_BufferTooSmall_Throws()
+    {
+        byte[] cdb = new byte[10];
+        Assert.Throws<ArgumentException>(() => BurnCommands.BuildSetCdSpeed(cdb, 0xFFFF, 176));
+    }
+
+    // ── READ TRACK INFORMATION ───────────────────────────────
+
+    [Fact]
+    public void BuildReadTrackInformation_ExactByteLayout()
+    {
+        Span<byte> cdb = stackalloc byte[10];
+        BurnCommands.BuildReadTrackInformation(cdb, trackNumber: 1);
+
+        Assert.Equal(0x52, cdb[0]);
+        Assert.Equal(0x01, cdb[1]); // address type: track number
+        Assert.Equal(0x00, cdb[2]);
+        Assert.Equal(0x00, cdb[3]);
+        Assert.Equal(0x00, cdb[4]);
+        Assert.Equal(0x01, cdb[5]); // track 1
+        Assert.Equal(0x00, cdb[7]);
+        Assert.Equal(0x24, cdb[8]); // allocation = 36
+    }
+
+    [Fact]
+    public void ParseNextWritableAddress_ValidNegative_ReturnsSignedLba()
+    {
+        byte[] response = new byte[36];
+        response[7] = 0x01; // NWA valid
+        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(12, 4), unchecked((uint)-11849));
+
+        int? nwa = BurnCommands.ParseNextWritableAddress(response);
+
+        Assert.Equal(-11849, nwa);
+    }
+
+    [Fact]
+    public void ParseNextWritableAddress_NwaInvalid_ReturnsNull()
+    {
+        byte[] response = new byte[36];
+        BinaryPrimitives.WriteUInt32BigEndian(response.AsSpan(12, 4), unchecked((uint)-11849));
+
+        Assert.Null(BurnCommands.ParseNextWritableAddress(response));
+    }
+
+    [Fact]
+    public void ParseNextWritableAddress_ResponseTooShort_ReturnsNull()
+    {
+        Assert.Null(BurnCommands.ParseNextWritableAddress(new byte[8]));
     }
 
     // ── MSF conversion ───────────────────────────────────────
