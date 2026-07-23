@@ -85,7 +85,11 @@ public sealed class BurnSession
     }
 
     /// <summary>
-    /// Erases a CD-RW disc.
+    /// Erases a CD-RW disc. Blocks until the erase finishes, but issues
+    /// the BLANK command with IMMED=1 and polls TEST UNIT READY: keeping
+    /// a single SCSI command open for the whole erase would exceed the
+    /// platform transports' per-command timeout and kill the blank
+    /// mid-erase.
     /// </summary>
     /// <param name="minimal">
     /// If true, performs a minimal blank (PMA/TOC only, ~1 minute).
@@ -94,8 +98,9 @@ public sealed class BurnSession
     public void Blank(bool minimal = true)
     {
         byte[] cdb = new byte[12];
-        BurnCommands.BuildBlank(cdb, minimal, immediate: false);
+        BurnCommands.BuildBlank(cdb, minimal, immediate: true);
         _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
+        BurnCommands.WaitWhileNotReady(_transport);
     }
 
     /// <summary>
@@ -183,6 +188,8 @@ public sealed class BurnSession
         // Step 5: Send the cue sheet, with CD-TEXT in the lead-in when
         // metadata is present. If the drive rejects the CD-TEXT variant,
         // fall back to a plain cue sheet — never fail a burn over metadata.
+        // Transient faults (NOT READY, no media) are not CD-TEXT rejections
+        // and propagate instead of silently stripping metadata.
         byte[]? cdTextPacks = BuildCdTextPacks(tracks);
         var cueSheet = BuildCueSheet(tracks, cdTextInLeadIn: cdTextPacks is not null);
 
@@ -190,7 +197,7 @@ public sealed class BurnSession
         {
             SendCueSheet(cueSheet);
         }
-        catch (OpticalDriveException ex) when (cdTextPacks is not null)
+        catch (OpticalDriveException ex) when (cdTextPacks is not null && ex is not DriveNotReadyException and not MediaNotPresentException)
         {
             _warnings.Add($"Drive rejected the CD-TEXT cue sheet ({ex.Message}); burning without CD-TEXT.");
             cdTextPacks = null;

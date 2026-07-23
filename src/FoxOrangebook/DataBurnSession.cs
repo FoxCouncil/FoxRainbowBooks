@@ -65,12 +65,19 @@ public sealed class DataBurnSession
         return BurnCommands.ParseReadDiscInformation(response);
     }
 
-    /// <summary>Erases a CD-RW disc.</summary>
+    /// <summary>
+    /// Erases a CD-RW disc. Blocks until the erase finishes, but issues
+    /// the BLANK command with IMMED=1 and polls TEST UNIT READY: keeping
+    /// a single SCSI command open for the whole erase would exceed the
+    /// platform transports' per-command timeout and kill the blank
+    /// mid-erase.
+    /// </summary>
     public void Blank(bool minimal = true)
     {
         byte[] cdb = new byte[12];
-        BurnCommands.BuildBlank(cdb, minimal, immediate: false);
+        BurnCommands.BuildBlank(cdb, minimal, immediate: true);
         _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
+        BurnCommands.WaitWhileNotReady(_transport);
     }
 
     /// <summary>

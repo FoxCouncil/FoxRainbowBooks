@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <Version>1.0.0-alpha.4</Version>
+    <Version>1.0.0-alpha.5</Version>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Disc-At-Once audio CD burning with cue sheet programming, buffer underrun protection, and file-backed burn simulation</Description>
     <PackageTags>cd-r;cd-rw;burning;orange-book;disc-at-once;cue-sheet</PackageTags>

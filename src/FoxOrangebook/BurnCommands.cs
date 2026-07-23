@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using FoxRedbook;
 
 namespace FoxOrangebook;
 
@@ -581,6 +582,43 @@ internal static class BurnCommands
 
         cdb.Clear();
         cdb[0] = OpTestUnitReady;
+    }
+
+    /// <summary>
+    /// Polls TEST UNIT READY every 500 ms while the drive reports NOT
+    /// READY, returning once it accepts the command. Used after issuing
+    /// long-running operations with IMMED=1 (e.g. BLANK): the drive
+    /// returns immediately and works in the background, so waiting via
+    /// polling avoids parking a single SCSI command past the platform
+    /// transports' per-command timeout. Rethrows the final
+    /// <see cref="DriveNotReadyException"/> if the drive is still busy
+    /// after roughly 60 minutes (a full blank of slow media takes tens
+    /// of minutes).
+    /// </summary>
+    internal static void WaitWhileNotReady(IScsiTransport transport)
+    {
+        const int maxAttempts = 7200; // ~60 minutes at 500 ms
+
+        for (int attempt = 0; ; attempt++)
+        {
+            byte[] cdb = new byte[6];
+            BuildTestUnitReady(cdb);
+
+            try
+            {
+                transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
+                return;
+            }
+            catch (DriveNotReadyException)
+            {
+                if (attempt >= maxAttempts)
+                {
+                    throw;
+                }
+
+                Thread.Sleep(500);
+            }
+        }
     }
 
     // ── SYNCHRONIZE CACHE (0x35) ─────────────────────────────

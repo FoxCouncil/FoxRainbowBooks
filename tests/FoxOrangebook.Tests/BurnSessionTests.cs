@@ -168,8 +168,28 @@ public sealed class BurnSessionTests
         var plain = BurnSession.BuildCueSheet(tracks);
         var withText = BurnSession.BuildCueSheet(tracks, cdTextInLeadIn: true);
 
-        Assert.Equal(CueSheetEntry.DataFormAudio, plain[0].DataForm);
+        Assert.Equal(CueSheetEntry.DataFormGenerated, plain[0].DataForm);
         Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, withText[0].DataForm);
+    }
+
+    [Fact]
+    public void BuildCueSheet_LeadInAndLeadOut_UseGeneratedDataForm()
+    {
+        // The host never streams the lead-in or lead-out; marking them
+        // host-supplied (0x00) makes the Pioneer BDR-XS07U (fw 1.03)
+        // reject the whole cue sheet with 5/26/00. Pregap and track
+        // entries stay host-supplied audio.
+        var tracks = new List<AudioTrackSource>
+        {
+            new() { Pcm = new MemoryStream(new byte[2352 * 400]) },
+        };
+
+        var entries = BurnSession.BuildCueSheet(tracks);
+
+        Assert.Equal(CueSheetEntry.DataFormGenerated, entries[0].DataForm);  // lead-in
+        Assert.Equal(CueSheetEntry.DataFormAudio, entries[1].DataForm);      // T1 pregap
+        Assert.Equal(CueSheetEntry.DataFormAudio, entries[2].DataForm);      // T1 start
+        Assert.Equal(CueSheetEntry.DataFormGenerated, entries[^1].DataForm); // lead-out
     }
 
     // ── Validation ───────────────────────────────────────────
@@ -403,7 +423,7 @@ public sealed class BurnSessionTests
         await session.BurnAsync(tracks);
 
         Assert.Single(transport.CueSheets);
-        Assert.Equal(CueSheetEntry.DataFormAudio, transport.CueSheets[0][3]); // lead-in entry data form
+        Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[0][3]); // lead-in entry data form
         Assert.False(transport.NwaQueried);
         Assert.Equal(0, transport.LeadInBytesWritten);
         Assert.Empty(session.Warnings);
@@ -448,13 +468,44 @@ public sealed class BurnSessionTests
         // First cue sheet carried CD-TEXT and was rejected; the retry is plain.
         Assert.Equal(2, transport.CueSheets.Count);
         Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[0][3]);
-        Assert.Equal(CueSheetEntry.DataFormAudio, transport.CueSheets[1][3]);
+        Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[1][3]);
 
         Assert.Equal(0, transport.LeadInBytesWritten);
         Assert.True(transport.SessionClosed);
         Assert.Equal(550, transport.ProgramSectorsWritten);
         Assert.Single(session.Warnings);
         Assert.Contains("CD-TEXT", session.Warnings[0], StringComparison.Ordinal);
+    }
+
+    public static TheoryData<OpticalDriveException> TransientCueSheetFailures => new()
+    {
+        new DriveNotReadyException("Drive is busy."),
+        new MediaNotPresentException("No disc in drive."),
+    };
+
+    [Theory]
+    [MemberData(nameof(TransientCueSheetFailures))]
+    public async Task BurnAsync_TransientCueSheetFailure_PropagatesInsteadOfDroppingCdText(OpticalDriveException failure)
+    {
+        ArgumentNullException.ThrowIfNull(failure);
+
+        // NOT READY / no-media faults on SEND CUE SHEET are not CD-TEXT
+        // rejections: the burn must fail with the real error, not retry
+        // without metadata.
+        var transport = new MockScsiTransport { CueSheetException = failure };
+        var session = new BurnSession(transport, new BurnOptions { DiscTitle = "Album" });
+
+        var tracks = new List<AudioTrackSource>
+        {
+            new() { Pcm = new MemoryStream(new byte[2352 * 400]), Title = "Song" },
+        };
+
+        var thrown = await Assert.ThrowsAsync(failure.GetType(), () => session.BurnAsync(tracks));
+
+        Assert.Same(failure, thrown);
+        Assert.Single(transport.CueSheets); // no plain-sheet retry
+        Assert.Empty(session.Warnings);
+        Assert.False(transport.SessionClosed);
     }
 
     [Fact]
@@ -478,6 +529,36 @@ public sealed class BurnSessionTests
         Assert.Equal("United Cat Orchestra", parsed.AlbumPerformer);
         Assert.Equal("Song of Joy", parsed.Tracks.Single(t => t.Number == 1).Title);
         Assert.Equal("Felix and The Purrs", parsed.Tracks.Single(t => t.Number == 1).Performer);
+    }
+
+    // ── Blank ────────────────────────────────────────────────
+
+    [Fact]
+    public void Blank_IssuesImmediateBlankAndPollsUntilReady()
+    {
+        var transport = new MockScsiTransport { NotReadyPolls = 2 };
+        var session = new BurnSession(transport);
+
+        session.Blank(minimal: true);
+
+        Assert.NotNull(transport.LastBlankCdb);
+        Assert.Equal(0xA1, transport.LastBlankCdb![0]);
+        Assert.Equal(0x11, transport.LastBlankCdb[1]); // IMMED (0x10) | minimal (0x01)
+
+        // Two NOT READY responses during the simulated erase, then success.
+        Assert.Equal(3, transport.TestUnitReadyCount);
+    }
+
+    [Fact]
+    public void Blank_Full_KeepsImmediateBit()
+    {
+        var transport = new MockScsiTransport();
+        var session = new BurnSession(transport);
+
+        session.Blank(minimal: false);
+
+        Assert.NotNull(transport.LastBlankCdb);
+        Assert.Equal(0x10, transport.LastBlankCdb![1]); // IMMED only, full blank
     }
 
     // ── Eject ────────────────────────────────────────────────
@@ -583,6 +664,7 @@ public sealed class BurnSessionTests
         public bool DaoSupported { get; set; } = true;
         public bool DiscIsBlank { get; set; } = true;
         public bool RejectCdTextCueSheet { get; set; }
+        public OpticalDriveException? CueSheetException { get; set; }
         public int CdTextLeadInSectors { get; set; } = 75;
 
         public long ProgramSectorsWritten { get; private set; }
@@ -600,6 +682,9 @@ public sealed class BurnSessionTests
         public byte[]? LastStartStopCdb { get; private set; }
         public byte[]? LastSetCdSpeedCdb { get; private set; }
         public bool SpeedSetBeforeOpc { get; private set; }
+        public byte[]? LastBlankCdb { get; private set; }
+        public int NotReadyPolls { get; set; }
+        public int TestUnitReadyCount { get; private set; }
 
         public DriveInquiry Inquiry => new()
         {
@@ -669,15 +754,19 @@ public sealed class BurnSessionTests
                 case BurnCommands.OpSendCueSheet:
                 {
                     byte[] data = buffer.ToArray();
+                    CueSheets.Add(data);
+
+                    if (CueSheetException is not null)
+                    {
+                        throw CueSheetException;
+                    }
 
                     // Entry 0 is the lead-in; byte 3 is its data form.
                     if (RejectCdTextCueSheet && data.Length >= 8 && (data[3] & 0x40) != 0)
                     {
-                        CueSheets.Add(data);
                         throw new OpticalDriveException("CHECK CONDITION: ILLEGAL REQUEST (mock rejects CD-TEXT cue sheets).");
                     }
 
-                    CueSheets.Add(data);
                     break;
                 }
 
@@ -733,6 +822,25 @@ public sealed class BurnSessionTests
                 case BurnCommands.OpStartStopUnit:
                 {
                     LastStartStopCdb = cdb.ToArray();
+                    break;
+                }
+
+                case BurnCommands.OpBlank:
+                {
+                    LastBlankCdb = cdb.ToArray();
+                    break;
+                }
+
+                case BurnCommands.OpTestUnitReady:
+                {
+                    TestUnitReadyCount++;
+
+                    if (NotReadyPolls > 0)
+                    {
+                        NotReadyPolls--;
+                        throw new DriveNotReadyException("Simulated erase in progress.");
+                    }
+
                     break;
                 }
 
