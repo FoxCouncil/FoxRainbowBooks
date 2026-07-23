@@ -41,8 +41,6 @@ namespace FoxRedbook.Platforms.Windows;
 [SupportedOSPlatform("windows")]
 public sealed class WindowsOpticalDrive : IOpticalDrive, IScsiTransport
 {
-    private const uint DefaultTimeoutSeconds = 30;
-
     private readonly SafeFileHandle _handle;
     private DriveInquiry? _cachedInquiry;
     private bool _disposed;
@@ -271,7 +269,7 @@ public sealed class WindowsOpticalDrive : IOpticalDrive, IScsiTransport
         wrapper.Spt.SenseInfoLength = 32; // matches SenseBuffer inline array size
         wrapper.Spt.DataIn = dataIn;
         wrapper.Spt.DataTransferLength = (uint)dataBuffer.Length;
-        wrapper.Spt.TimeOutValue = DefaultTimeoutSeconds;
+        wrapper.Spt.TimeOutValue = ScsiCommands.TimeoutSecondsForCdb(cdb[0]);
         wrapper.Spt.SenseInfoOffset = (uint)Marshal.OffsetOf<ScsiPassThroughDirectWithBuffer>(nameof(ScsiPassThroughDirectWithBuffer.SenseBuf));
 
         // Copy the CDB into the inline array.

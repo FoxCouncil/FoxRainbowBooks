@@ -229,6 +229,10 @@ public sealed class BurnSession
         IProgress<BurnProgress>? progress,
         CancellationToken cancellationToken)
     {
+        // The drive may still be committing the lead-in (CD-TEXT writes,
+        // session setup) — don't race it with the first program WRITE.
+        BurnCommands.WaitWhileNotReady(_transport);
+
         // Every region the laser passes over is streamed by the host:
         // pregap silence (track 1's forced 150 plus any later pregaps)
         // followed by each track's PCM.

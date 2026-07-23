@@ -21,6 +21,39 @@ internal static class ScsiCommands
     internal const byte OpReadToc = 0x43;
     internal const byte OpReadCd = 0xBE;
 
+    // ── Command timeouts ───────────────────────────────────────────
+
+    /// <summary>Timeout for quick commands: reads, inquiries, mode pages.</summary>
+    internal const uint DefaultCommandTimeoutSeconds = 30;
+
+    /// <summary>Timeout for long-running burn-class commands.</summary>
+    internal const uint LongCommandTimeoutSeconds = 300;
+
+    /// <summary>
+    /// Selects the per-command SCSI timeout by opcode. Burn-class
+    /// commands legitimately run far past the 30-second read timeout:
+    /// the first WRITE (10) after SEND CUE SHEET can stall tens of
+    /// seconds while the drive settles the session (observed on a
+    /// Pioneer BDR-XS07U as ERROR_SEM_TIMEOUT mid-burn), and BLANK,
+    /// SYNCHRONIZE CACHE, CLOSE TRACK/SESSION, FORMAT UNIT, and OPC are
+    /// long by nature. 300 seconds matches cdrecord/growisofs practice.
+    /// All three platform backends key their native timeout field off
+    /// this so behavior stays identical across OSes.
+    /// </summary>
+    internal static uint TimeoutSecondsForCdb(byte opcode) => opcode switch
+    {
+        0x2A       // WRITE (10)
+        or 0xA1    // BLANK
+        or 0x35    // SYNCHRONIZE CACHE
+        or 0x5B    // CLOSE TRACK/SESSION
+        or 0x54    // SEND OPC INFORMATION
+        or 0x04    // FORMAT UNIT
+        or 0x5D    // SEND CUE SHEET
+        or 0xBB    // SET CD SPEED
+            => LongCommandTimeoutSeconds,
+        _ => DefaultCommandTimeoutSeconds,
+    };
+
     // ── INQUIRY ────────────────────────────────────────────────────
 
     /// <summary>

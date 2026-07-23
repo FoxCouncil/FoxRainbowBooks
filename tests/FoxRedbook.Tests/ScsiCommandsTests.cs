@@ -421,4 +421,35 @@ public sealed class ScsiCommandsTests
         sense[13] = ascq;
         return sense;
     }
+
+    // ── Command timeouts ─────────────────────────────────────
+
+    [Theory]
+    [InlineData(0x2A)] // WRITE (10)
+    [InlineData(0xA1)] // BLANK
+    [InlineData(0x35)] // SYNCHRONIZE CACHE
+    [InlineData(0x5B)] // CLOSE TRACK/SESSION
+    [InlineData(0x54)] // SEND OPC INFORMATION
+    [InlineData(0x04)] // FORMAT UNIT
+    [InlineData(0x5D)] // SEND CUE SHEET
+    [InlineData(0xBB)] // SET CD SPEED
+    public void TimeoutSecondsForCdb_BurnClassOpcodes_GetExtendedTimeout(byte opcode)
+    {
+        Assert.Equal(ScsiCommands.LongCommandTimeoutSeconds, ScsiCommands.TimeoutSecondsForCdb(opcode));
+    }
+
+    [Theory]
+    [InlineData(0x12)] // INQUIRY
+    [InlineData(0x43)] // READ TOC/PMA/ATIP
+    [InlineData(0xBE)] // READ CD
+    [InlineData(0x46)] // GET CONFIGURATION
+    [InlineData(0x51)] // READ DISC INFORMATION
+    [InlineData(0x52)] // READ TRACK INFORMATION
+    [InlineData(0x55)] // MODE SELECT (10)
+    [InlineData(0x00)] // TEST UNIT READY
+    [InlineData(0x1B)] // START STOP UNIT
+    public void TimeoutSecondsForCdb_QuickOpcodes_KeepDefaultTimeout(byte opcode)
+    {
+        Assert.Equal(ScsiCommands.DefaultCommandTimeoutSeconds, ScsiCommands.TimeoutSecondsForCdb(opcode));
+    }
 }

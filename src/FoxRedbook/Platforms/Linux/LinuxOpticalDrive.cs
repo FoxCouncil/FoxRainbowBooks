@@ -28,7 +28,6 @@ namespace FoxRedbook.Platforms.Linux;
 [SupportedOSPlatform("linux")]
 public sealed class LinuxOpticalDrive : IOpticalDrive, IScsiTransport
 {
-    private const uint DefaultTimeoutMs = 30_000;
     private const int SenseBufferSize = 18; // fixed-format sense data
 
     private readonly SafeFileDescriptorHandle _fd;
@@ -247,7 +246,7 @@ public sealed class LinuxOpticalDrive : IOpticalDrive, IScsiTransport
                 Dxferp = (IntPtr)dataPtr,
                 Cmdp = (IntPtr)cdbPtr,
                 Sbp = (IntPtr)sensePtr,
-                Timeout = DefaultTimeoutMs,
+                Timeout = ScsiCommands.TimeoutSecondsForCdb(cdb[0]) * 1000, // sg_io timeout is in ms
                 Flags = 0, // indirect I/O, no alignment requirement
             };
 

@@ -42,7 +42,6 @@ namespace FoxRedbook.Platforms.MacOS;
 [SupportedOSPlatform("macos")]
 public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
 {
-    private const uint DefaultTimeoutMs = 30_000;
     private const int SenseBufferSize = 32;
     private const double UnmountTimeoutSeconds = 30.0;
 
@@ -926,9 +925,9 @@ public sealed class MacOpticalDrive : IOpticalDrive, IScsiTransport
                     throw MapIoReturn(rc, "SetScatterGatherEntries");
                 }
 
-                // SetTimeoutDuration at offset 96
+                // SetTimeoutDuration at offset 96 (milliseconds)
                 var setTimeout = (delegate* unmanaged[Cdecl]<IntPtr, uint, int>)Marshal.ReadIntPtr(taskVtable, 96);
-                rc = setTimeout(taskPtr, DefaultTimeoutMs);
+                rc = setTimeout(taskPtr, ScsiCommands.TimeoutSecondsForCdb(cdb[0]) * 1000);
 
                 if (rc != IoKitNative.kIOReturnSuccess)
                 {
