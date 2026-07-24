@@ -557,9 +557,38 @@ public sealed class BurnSession
 
     private void CloseSession()
     {
+        // The drive may still be flushing its write buffer after the last
+        // program WRITE — a blocking CLOSE at that moment fails with
+        // NOT READY 02/04/07 (observed on the Pioneer BDR-XS07U). Same
+        // sequence as DataBurnSession's finalize: flush the cache, wait
+        // until ready, close as a background operation, wait again.
         byte[] cdb = new byte[10];
-        BurnCommands.BuildCloseSession(cdb, immediate: false);
-        _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
+        BurnCommands.BuildSynchronizeCache(cdb);
+
+        try
+        {
+            _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
+        }
+        catch (DriveNotReadyException)
+        {
+            // Still flushing — the readiness wait below blocks until done.
+        }
+
+        BurnCommands.WaitWhileNotReady(_transport);
+
+        cdb = new byte[10];
+        BurnCommands.BuildCloseSession(cdb, immediate: true);
+
+        try
+        {
+            _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
+        }
+        catch (DriveNotReadyException)
+        {
+            // Close accepted as a background operation.
+        }
+
+        BurnCommands.WaitWhileNotReady(_transport);
     }
 
     // ── Cue sheet builder ────────────────────────────────────

@@ -309,6 +309,13 @@ public sealed class BurnSessionTests
         Assert.True(transport.OpcPerformed);
         Assert.True(transport.WriteParametersSet);
         Assert.Single(transport.CueSheets);
+
+        // Finalize: cache flushed before the close, close sent with IMMED
+        // so the drive finishes in the background while we poll ready.
+        Assert.True(transport.CacheSynchronizedBeforeClose);
+        Assert.NotNull(transport.LastCloseCdb);
+        Assert.Equal(0x01, transport.LastCloseCdb![1]); // IMMED
+        Assert.Equal(0x02, transport.LastCloseCdb[2]);  // close session
     }
 
     [Fact]
@@ -792,6 +799,9 @@ public sealed class BurnSessionTests
         public bool LeadInWrittenBeforeProgram { get; private set; } = true;
         public bool NwaQueried { get; private set; }
         public List<byte[]> CueSheets { get; } = new();
+        public bool CacheSynchronized { get; private set; }
+        public bool CacheSynchronizedBeforeClose { get; private set; }
+        public byte[]? LastCloseCdb { get; private set; }
         public bool SessionClosed { get; private set; }
         public bool OpcPerformed { get; private set; }
         public bool WriteParametersSet { get; private set; }
@@ -972,8 +982,16 @@ public sealed class BurnSessionTests
                     break;
                 }
 
+                case BurnCommands.OpSynchronizeCache:
+                {
+                    CacheSynchronized = true;
+                    break;
+                }
+
                 case BurnCommands.OpCloseTrackSession:
                 {
+                    CacheSynchronizedBeforeClose = CacheSynchronized;
+                    LastCloseCdb = cdb.ToArray();
                     SessionClosed = true;
                     break;
                 }
