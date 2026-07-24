@@ -182,9 +182,11 @@ public sealed class FileBackedBurnTests : IDisposable
         };
         var session = new BurnSession(transport, new BurnOptions { DiscTitle = "Album", DiscPerformer = "Artist" });
 
+        byte[] pcm = CreateTestPcm(400);
+
         var tracks = new List<AudioTrackSource>
         {
-            new() { Pcm = new MemoryStream(CreateTestPcm(400)), Title = "Song One", Performer = "Artist" },
+            new() { Pcm = new MemoryStream(pcm), Title = "Song One", Performer = "Artist" },
         };
 
         await session.BurnAsync(tracks);
@@ -192,8 +194,13 @@ public sealed class FileBackedBurnTests : IDisposable
         // The simulated lead-in is completely filled with 96-byte sectors.
         Assert.Equal(transport.CdTextLeadInSectors * 96, transport.CdTextLeadInData.Length);
 
-        // The .bin holds only the program area — lead-in data stays out.
+        // The .bin holds only the program area — lead-in data stays out,
+        // and the 96 P-W sub-channel bytes of each 2,448-byte program
+        // sector are stripped so the audio is byte-exact at its offset.
         Assert.Equal((PregapSectors + 400L) * CdConstants.SectorSize, new FileInfo(binPath).Length);
+
+        byte[] binData = File.ReadAllBytes(binPath);
+        Assert.True(binData.AsSpan(PregapSectors * CdConstants.SectorSize, pcm.Length).SequenceEqual(pcm));
 
         // Decoded packs round-trip to the original metadata.
         byte[] packs = CdTextTestHelpers.CollapseFrom6Bit(transport.CdTextLeadInData.Span);

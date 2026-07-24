@@ -194,6 +194,9 @@ internal static class BurnCommands
         BinaryPrimitives.WriteUInt16BigEndian(cdb.Slice(7, 2), (ushort)parameterListLength);
     }
 
+    /// <summary>Data block type 3: raw data with raw P-W sub-channel, 2,448 bytes/sector.</summary>
+    internal const byte DataBlockTypeRawPw = 0x03;
+
     /// <summary>
     /// Builds the MODE SELECT parameter list with Write Parameters page 0x05
     /// configured for DAO audio burning.
@@ -201,8 +204,17 @@ internal static class BurnCommands
     /// <param name="buffer">Output buffer for the mode parameter header + page. Must be at least 60 bytes.</param>
     /// <param name="testWrite">If true, enables simulation mode (no actual burn).</param>
     /// <param name="bufferUnderrunProtection">If true, enables BUFE.</param>
+    /// <param name="cdText">
+    /// If true, sets Data Block Type 3 (raw data + raw P-W sub-channel,
+    /// 2,448 bytes/sector). CD-TEXT rides in the R-W sub-channel, which
+    /// only exists in this mode — declaring CD-TEXT in the cue sheet
+    /// (lead-in data form 0x41) with block type 0 tells the drive text is
+    /// coming with no sub-channel to receive it, and wedges drives like
+    /// the Pioneer BDR-XS07U on the first program WRITE. Mirrors cdrdao's
+    /// setWriteParameters (mp[4] |= 3).
+    /// </param>
     /// <returns>Number of bytes written to <paramref name="buffer"/>.</returns>
-    internal static int BuildWriteParametersPage(Span<byte> buffer, bool testWrite, bool bufferUnderrunProtection)
+    internal static int BuildWriteParametersPage(Span<byte> buffer, bool testWrite, bool bufferUnderrunProtection, bool cdText)
     {
         // 8-byte mode parameter header + 2-byte page header + 50-byte page body = 60 bytes
         const int totalLength = 8 + 2 + WriteParametersPageLength;
@@ -238,7 +250,7 @@ internal static class BurnCommands
 
         buffer[page + 2] = flags;
         buffer[page + 3] = 0x00; // Track mode: audio, 2-channel, no pre-emphasis
-        buffer[page + 4] = 0x00; // Data block type: raw 2352
+        buffer[page + 4] = cdText ? DataBlockTypeRawPw : (byte)0x00; // Data block type: raw 2448 w/ P-W, or raw 2352
         buffer[page + 14] = 0x00; // Session format: CD-DA or CD-ROM
 
         return totalLength;

@@ -172,7 +172,7 @@ public sealed class BurnCommandsTests
     public void BuildWriteParametersPage_DaoAudio_CorrectValues()
     {
         byte[] buffer = new byte[60];
-        int len = BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: false);
+        int len = BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: false, cdText: false);
 
         Assert.Equal(60, len);
         Assert.Equal(0x05, buffer[8]);  // page code
@@ -183,10 +183,25 @@ public sealed class BurnCommandsTests
     }
 
     [Fact]
+    public void BuildWriteParametersPage_CdText_SetsRawPwDataBlockType()
+    {
+        // CD-TEXT rides in the R-W sub-channel, which only exists with
+        // Data Block Type 3 (raw + raw P-W, 2448 bytes/sector). Mirrors
+        // cdrdao's setWriteParameters (mp[4] |= 3).
+        byte[] buffer = new byte[60];
+        BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: false, cdText: true);
+
+        Assert.Equal(0x03, buffer[12]); // data block type = raw 2448 with raw P-W sub-channel
+        Assert.Equal(0x02, buffer[10]); // write type stays DAO
+        Assert.Equal(0x00, buffer[11]); // track mode stays audio
+        Assert.Equal(0x00, buffer[22]); // session format stays CD-DA
+    }
+
+    [Fact]
     public void BuildWriteParametersPage_TestWrite_SetsBit()
     {
         byte[] buffer = new byte[60];
-        BurnCommands.BuildWriteParametersPage(buffer, testWrite: true, bufferUnderrunProtection: false);
+        BurnCommands.BuildWriteParametersPage(buffer, testWrite: true, bufferUnderrunProtection: false, cdText: false);
 
         Assert.Equal(0x12, buffer[10]); // DAO (0x02) | test write (0x10)
     }
@@ -195,7 +210,7 @@ public sealed class BurnCommandsTests
     public void BuildWriteParametersPage_Bufe_SetsBit()
     {
         byte[] buffer = new byte[60];
-        BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: true);
+        BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: true, cdText: false);
 
         Assert.Equal(0x42, buffer[10]); // DAO (0x02) | BUFE (0x40)
     }

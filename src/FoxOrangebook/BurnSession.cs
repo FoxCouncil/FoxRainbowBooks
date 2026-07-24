@@ -41,9 +41,16 @@ public sealed class BurnSession
     /// <summary>96-byte lead-in sectors streamed per WRITE (10) while writing CD-TEXT.</summary>
     private const int CdTextSectorsPerWrite = 128;
 
+    /// <summary>
+    /// Retry cap for "long write in progress" NOT READY responses during
+    /// lead-in writes (40 ms apart, per cdrdao's GenericMMC handling).
+    /// </summary>
+    private const int MaxLeadInNotReadyRetries = 1500;
+
     private readonly IScsiTransport _transport;
     private readonly BurnOptions _options;
     private readonly List<string> _warnings = new();
+    private long _programSectorsWritten;
 
     public BurnSession(IScsiTransport transport, BurnOptions? options = null)
     {
@@ -182,56 +189,121 @@ public sealed class BurnSession
 
         RunOpc();
 
-        // Step 4: Set write parameters for DAO audio.
-        SetWriteParameters();
-
-        // Step 5: Send the cue sheet, with CD-TEXT in the lead-in when
-        // metadata is present. If the drive rejects the CD-TEXT variant,
-        // fall back to a plain cue sheet — never fail a burn over metadata.
-        // Transient faults (NOT READY, no media) are not CD-TEXT rejections
-        // and propagate instead of silently stripping metadata.
+        // Steps 4-8: write parameters, cue sheet, lead-in, program area,
+        // close. With CD-TEXT metadata this runs an attempt chain — never
+        // fail a burn over metadata:
+        //   1. Data block type 3 (raw + raw P-W sub-channel, 2,448 B/sector),
+        //      the mode CD-TEXT rides in per MMC and cdrdao.
+        //   2. Same CD-TEXT cue sheet without the block-type change
+        //      (cdrdao's WMP_VAR_CDTEXT_NO_DATA_BLOCK_TYPE fallback for
+        //      drives that reject block type 3).
+        //   3. Plain burn without CD-TEXT.
+        // Transient faults (NOT READY, no media) and failures after program
+        // data has hit the disc are never retried — they propagate.
         byte[]? cdTextPacks = BuildCdTextPacks(tracks);
-        var cueSheet = BuildCueSheet(tracks, cdTextInLeadIn: cdTextPacks is not null);
+
+        if (cdTextPacks is not null)
+        {
+            if (await TryBurnWithCdTextAsync(tracks, cdTextPacks, rawPwSectors: true, progress, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            if (await TryBurnWithCdTextAsync(tracks, cdTextPacks, rawPwSectors: false, progress, cancellationToken).ConfigureAwait(false))
+            {
+                return;
+            }
+
+            _warnings.Add("CD-TEXT could not be burned in either sub-channel mode; burning without CD-TEXT.");
+        }
+
+        SetWriteParameters(cdText: false);
+        SendCueSheet(BuildCueSheet(tracks, cdTextInLeadIn: false));
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await WriteProgramAreaAsync(tracks, rawPwSectors: false, progress, cancellationToken).ConfigureAwait(false);
+
+        CloseSession();
+    }
+
+    /// <summary>
+    /// Runs one full CD-TEXT burn attempt: write parameters (block type 3
+    /// when <paramref name="rawPwSectors"/>), CD-TEXT cue sheet, lead-in
+    /// packs per the drive's NWA, program area, close. Returns false —
+    /// with a warning recorded — when the drive rejects the cue sheet or
+    /// the very first program write, so the caller can fall back. Failures
+    /// after any program sector has been written are not retryable (the
+    /// disc is partially burned) and propagate.
+    /// </summary>
+    private async Task<bool> TryBurnWithCdTextAsync(
+        IReadOnlyList<AudioTrackSource> tracks,
+        byte[] cdTextPacks,
+        bool rawPwSectors,
+        IProgress<BurnProgress>? progress,
+        CancellationToken cancellationToken)
+    {
+        string mode = rawPwSectors ? "raw P-W sub-channel mode (2448-byte sectors)" : "plain block mode";
+
+        SetWriteParameters(cdText: rawPwSectors);
+        var cueSheet = BuildCueSheet(tracks, cdTextInLeadIn: true);
 
         try
         {
             SendCueSheet(cueSheet);
         }
-        catch (OpticalDriveException ex) when (cdTextPacks is not null && ex is not DriveNotReadyException and not MediaNotPresentException)
+        catch (OpticalDriveException ex) when (!IsTransient(ex))
         {
-            _warnings.Add($"Drive rejected the CD-TEXT cue sheet ({ex.Message}); burning without CD-TEXT.");
-            cdTextPacks = null;
-            cueSheet = BuildCueSheet(tracks, cdTextInLeadIn: false);
-            SendCueSheet(cueSheet);
+            _warnings.Add($"Drive rejected the CD-TEXT cue sheet in {mode}: {ex.Message}");
+            return false;
         }
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        // Step 6: Stream CD-TEXT packs into the lead-in.
-        if (cdTextPacks is not null)
+        try
         {
             WriteCdTextLeadIn(cdTextPacks, cancellationToken);
+            await WriteProgramAreaAsync(tracks, rawPwSectors, progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OpticalDriveException ex) when (!IsTransient(ex) && _programSectorsWritten == 0)
+        {
+            _warnings.Add($"Burn failed before any program data in {mode}: {ex.Message}");
+            return false;
         }
 
-        // Step 7: Write the program area, starting with track 1's pregap
-        // silence at LBA -150 so every cue sheet index lands exactly on
-        // its audio.
-        await WriteProgramAreaAsync(tracks, progress, cancellationToken).ConfigureAwait(false);
-
-        // Step 8: Close the session to finalize.
         CloseSession();
+
+        if (!rawPwSectors)
+        {
+            _warnings.Add("CD-TEXT was burned without the 2448-byte block type (drive fallback path).");
+        }
+
+        return true;
     }
+
+    private static bool IsTransient(OpticalDriveException ex) => ex is DriveNotReadyException or MediaNotPresentException;
 
     // ── Program area streaming ───────────────────────────────
 
     private async Task WriteProgramAreaAsync(
         IReadOnlyList<AudioTrackSource> tracks,
+        bool rawPwSectors,
         IProgress<BurnProgress>? progress,
         CancellationToken cancellationToken)
     {
+        _programSectorsWritten = 0;
+
         // The drive may still be committing the lead-in (CD-TEXT writes,
         // session setup) — don't race it with the first program WRITE.
         BurnCommands.WaitWhileNotReady(_transport);
+
+        // With data block type 3 every host-supplied sector is 2,448 bytes:
+        // 2,352 of audio followed by 96 bytes of raw P-W sub-channel.
+        // Zero-filled sub-channel is acceptable in the program area — the
+        // positional sub-channel there is not required for playback.
+        int sectorBytes = rawPwSectors
+            ? CdConstants.SectorSize + CdConstants.SubchannelSize
+            : CdConstants.SectorSize;
 
         // Every region the laser passes over is streamed by the host:
         // pregap silence (track 1's forced 150 plus any later pregaps)
@@ -279,28 +351,32 @@ public sealed class BurnSession
 
                 int remaining = sectors - written;
                 int batch = Math.Min(remaining, _options.SectorsPerWrite);
-                int byteCount = batch * CdConstants.SectorSize;
 
-                byte[] buffer = new byte[byteCount];
+                byte[] buffer = new byte[batch * sectorBytes];
 
                 if (pcm is not null)
                 {
-                    int bytesRead = 0;
-
-                    while (bytesRead < byteCount)
+                    // Fill each sector's audio portion; in raw P-W mode the
+                    // trailing 96 sub-channel bytes stay zero. A stream that
+                    // ends early leaves the remainder as silence.
+                    for (int s = 0; s < batch; s++)
                     {
-                        int n = await pcm.ReadAsync(
-                            buffer.AsMemory(bytesRead, byteCount - bytesRead),
-                            cancellationToken).ConfigureAwait(false);
+                        int sectorOffset = s * sectorBytes;
+                        int bytesRead = 0;
 
-                        if (n == 0)
+                        while (bytesRead < CdConstants.SectorSize)
                         {
-                            // Pad with silence if the stream is shorter than expected.
-                            Array.Clear(buffer, bytesRead, byteCount - bytesRead);
-                            break;
-                        }
+                            int n = await pcm.ReadAsync(
+                                buffer.AsMemory(sectorOffset + bytesRead, CdConstants.SectorSize - bytesRead),
+                                cancellationToken).ConfigureAwait(false);
 
-                        bytesRead += n;
+                            if (n == 0)
+                            {
+                                break;
+                            }
+
+                            bytesRead += n;
+                        }
                     }
                 }
 
@@ -312,6 +388,7 @@ public sealed class BurnSession
                 written += batch;
                 trackWritten += batch;
                 totalWritten += batch;
+                _programSectorsWritten = totalWritten;
 
                 progress?.Report(new BurnProgress
                 {
@@ -343,16 +420,27 @@ public sealed class BurnSession
 
     private void WriteCdTextLeadIn(byte[] packs, CancellationToken cancellationToken)
     {
-        // After a cue sheet whose lead-in carries CD-TEXT, the drive's
-        // Next Writable Address points at the start of the lead-in — a
-        // large negative LBA determined by the media's ATIP. The packs
-        // are expanded to 6-bit subchannel form, 4 packs (96 bytes) per
-        // sector, and cycled until the lead-in is full at LBA -151.
+        // After a cue sheet whose lead-in carries CD-TEXT (data form 0x41 =
+        // sub-channel from host, main data generated by the drive), the
+        // drive's Next Writable Address reports where lead-in writes must
+        // start. The packs are expanded to 6-bit sub-channel form, 4 packs
+        // (96 bytes) per sector, and cycled until the lead-in is full at
+        // LBA -151 — each transfer carries only the 96 sub-channel bytes
+        // per sector, mirroring cdrdao's writeCdTextLeadIn.
         int? nwa = ReadNextWritableAddress();
 
-        if (nwa is null || nwa.Value >= -MandatoryPregapSectors)
+        if (nwa is null)
         {
-            _warnings.Add("Drive did not report a lead-in write address; CD-TEXT was skipped.");
+            _warnings.Add("Drive did not report a next writable address after the CD-TEXT cue sheet; lead-in packs were not streamed.");
+            return;
+        }
+
+        if (nwa.Value >= -MandatoryPregapSectors)
+        {
+            // The drive generates the lead-in itself — forcing lead-in
+            // writes here wedges drives (hardware-proven on the Pioneer
+            // BDR-XS07U). The CD-TEXT reaches the disc via the raw P-W
+            // sub-channel path declared in the write parameters.
             return;
         }
 
@@ -361,6 +449,7 @@ public sealed class BurnSession
         int sectorsRemaining = -MandatoryPregapSectors - nwa.Value;
         long lba = nwa.Value;
         int subCursor = 0;
+        int notReadyRetries = 0;
 
         while (sectorsRemaining > 0)
         {
@@ -382,7 +471,29 @@ public sealed class BurnSession
 
             byte[] cdb = new byte[10];
             BurnCommands.BuildWrite10(cdb, unchecked((uint)lba), (ushort)batch);
-            _transport.Execute(cdb, buffer, ScsiDirection.Out);
+
+            // The drive may answer NOT READY ("long write in progress")
+            // while its buffer drains — retry the same batch after 40 ms,
+            // as cdrdao does.
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                try
+                {
+                    _transport.Execute(cdb, buffer, ScsiDirection.Out);
+                    break;
+                }
+                catch (DriveNotReadyException)
+                {
+                    if (++notReadyRetries > MaxLeadInNotReadyRetries)
+                    {
+                        throw;
+                    }
+
+                    Thread.Sleep(40);
+                }
+            }
 
             lba += batch;
             sectorsRemaining -= batch;
@@ -415,10 +526,10 @@ public sealed class BurnSession
         _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
     }
 
-    private void SetWriteParameters()
+    private void SetWriteParameters(bool cdText)
     {
         byte[] pageData = new byte[60];
-        int len = BurnCommands.BuildWriteParametersPage(pageData, _options.TestWrite, _options.BufferUnderrunProtection);
+        int len = BurnCommands.BuildWriteParametersPage(pageData, _options.TestWrite, _options.BufferUnderrunProtection, cdText);
 
         byte[] cdb = new byte[10];
         BurnCommands.BuildModeSelect10(cdb, len);

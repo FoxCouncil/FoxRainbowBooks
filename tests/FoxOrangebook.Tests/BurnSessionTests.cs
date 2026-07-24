@@ -426,6 +426,7 @@ public sealed class BurnSessionTests
         Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[0][3]); // lead-in entry data form
         Assert.False(transport.NwaQueried);
         Assert.Equal(0, transport.LeadInBytesWritten);
+        Assert.Equal(0, transport.LastDataBlockType); // raw 2352, no P-W sub-channel
         Assert.Empty(session.Warnings);
     }
 
@@ -446,6 +447,11 @@ public sealed class BurnSessionTests
         Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[0][3]);
         Assert.True(transport.NwaQueried);
 
+        // Data block type 3: program sectors carry 2,448 bytes each
+        // (2,352 audio + 96 raw P-W sub-channel).
+        Assert.Equal(3, transport.LastDataBlockType);
+        Assert.Equal(550L * 2448, transport.ProgramBytesWritten);
+
         // The whole simulated lead-in is filled: 40 sectors × 96 bytes.
         Assert.Equal(40 * 96, transport.LeadInBytesWritten);
         Assert.True(transport.LeadInWrittenBeforeProgram);
@@ -453,7 +459,7 @@ public sealed class BurnSessionTests
     }
 
     [Fact]
-    public async Task BurnAsync_DriveRejectsCdTextCueSheet_RetriesWithoutAndWarns()
+    public async Task BurnAsync_DriveRejectsAllCdTextCueSheets_BurnsPlainAndWarns()
     {
         var transport = new MockScsiTransport { RejectCdTextCueSheet = true };
         var session = new BurnSession(transport, new BurnOptions { DiscTitle = "Album" });
@@ -465,16 +471,97 @@ public sealed class BurnSessionTests
 
         await session.BurnAsync(tracks);
 
-        // First cue sheet carried CD-TEXT and was rejected; the retry is plain.
-        Assert.Equal(2, transport.CueSheets.Count);
+        // Both CD-TEXT attempts (2448-byte mode, then plain block mode)
+        // were rejected; the final cue sheet is plain.
+        Assert.Equal(3, transport.CueSheets.Count);
         Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[0][3]);
-        Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[1][3]);
+        Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[1][3]);
+        Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[2][3]);
 
         Assert.Equal(0, transport.LeadInBytesWritten);
+        Assert.Equal(0, transport.LastDataBlockType);
         Assert.True(transport.SessionClosed);
         Assert.Equal(550, transport.ProgramSectorsWritten);
-        Assert.Single(session.Warnings);
-        Assert.Contains("CD-TEXT", session.Warnings[0], StringComparison.Ordinal);
+        Assert.Equal(3, session.Warnings.Count);
+        Assert.All(session.Warnings, w => Assert.Contains("CD-TEXT", w, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task BurnAsync_DriveRejects2448CueSheet_FallsBackToPlainBlockCdText()
+    {
+        // cdrdao's WMP_VAR_CDTEXT_NO_DATA_BLOCK_TYPE path: the drive
+        // rejects the cue sheet only while data block type 3 is set.
+        var transport = new MockScsiTransport { RejectRawPwCueSheet = true, CdTextLeadInSectors = 40 };
+        var session = new BurnSession(transport, new BurnOptions { DiscTitle = "Album" });
+
+        var tracks = new List<AudioTrackSource>
+        {
+            new() { Pcm = new MemoryStream(new byte[2352 * 400]), Title = "Song" },
+        };
+
+        await session.BurnAsync(tracks);
+
+        // Both cue sheets carry CD-TEXT; the second (block type 0) sticks.
+        Assert.Equal(2, transport.CueSheets.Count);
+        Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[0][3]);
+        Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[1][3]);
+        Assert.Equal(0, transport.LastDataBlockType);
+
+        // Lead-in was streamed once (second attempt only) and program
+        // sectors went out at 2,352 bytes.
+        Assert.Equal(40 * 96, transport.LeadInBytesWritten);
+        Assert.Equal(550L * 2352, transport.ProgramBytesWritten);
+        Assert.True(transport.SessionClosed);
+        Assert.Equal(2, session.Warnings.Count);
+        Assert.Contains("2448", session.Warnings[1], StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BurnAsync_DriveRejects2448ProgramWrites_FallsBackToPlainBlockCdText()
+    {
+        // The Pioneer failure shape: cue sheet accepted, but the first
+        // program WRITE dies while block type 3 is active.
+        var transport = new MockScsiTransport { RejectRawPwProgramWrites = true, CdTextLeadInSectors = 40 };
+        var session = new BurnSession(transport, new BurnOptions { DiscTitle = "Album" });
+
+        var tracks = new List<AudioTrackSource>
+        {
+            new() { Pcm = new MemoryStream(new byte[2352 * 400]), Title = "Song" },
+        };
+
+        await session.BurnAsync(tracks);
+
+        Assert.Equal(2, transport.CueSheets.Count);
+        Assert.Equal(CueSheetEntry.DataFormCdTextLeadIn, transport.CueSheets[1][3]);
+        Assert.Equal(0, transport.LastDataBlockType);
+
+        // Lead-in was streamed in both attempts; only the second attempt's
+        // program area landed, at 2,352 bytes per sector.
+        Assert.Equal(2 * 40 * 96, transport.LeadInBytesWritten);
+        Assert.Equal(550, transport.ProgramSectorsWritten);
+        Assert.Equal(550L * 2352, transport.ProgramBytesWritten);
+        Assert.Equal(-150, transport.FirstProgramWriteLba);
+        Assert.True(transport.SessionClosed);
+        Assert.Equal(2, session.Warnings.Count);
+    }
+
+    [Fact]
+    public async Task BurnAsync_MidBurnWriteFailure_PropagatesWithoutRetry()
+    {
+        // Once program data is on the disc a retry is impossible — the
+        // failure must surface, not trigger the CD-TEXT fallback chain.
+        var transport = new MockScsiTransport { FailProgramWriteNumber = 3 };
+        var session = new BurnSession(transport, new BurnOptions { DiscTitle = "Album" });
+
+        var tracks = new List<AudioTrackSource>
+        {
+            new() { Pcm = new MemoryStream(new byte[2352 * 400]), Title = "Song" },
+        };
+
+        await Assert.ThrowsAsync<OpticalDriveException>(() => session.BurnAsync(tracks));
+
+        Assert.Single(transport.CueSheets);
+        Assert.False(transport.SessionClosed);
     }
 
     public static TheoryData<OpticalDriveException> TransientCueSheetFailures => new()
@@ -664,9 +751,15 @@ public sealed class BurnSessionTests
         public bool DaoSupported { get; set; } = true;
         public bool DiscIsBlank { get; set; } = true;
         public bool RejectCdTextCueSheet { get; set; }
+        public bool RejectRawPwCueSheet { get; set; }
+        public bool RejectRawPwProgramWrites { get; set; }
+        public int? FailProgramWriteNumber { get; set; }
         public OpticalDriveException? CueSheetException { get; set; }
         public int CdTextLeadInSectors { get; set; } = 75;
 
+        public int LastDataBlockType { get; private set; } = -1;
+        public int ProgramWriteCount { get; private set; }
+        public long ProgramBytesWritten { get; private set; }
         public long ProgramSectorsWritten { get; private set; }
         public long? FirstProgramWriteLba { get; private set; }
         public long? NextExpectedProgramLba { get; private set; }
@@ -748,6 +841,13 @@ public sealed class BurnSessionTests
                 case BurnCommands.OpModeSelect10:
                 {
                     WriteParametersSet = true;
+
+                    // Write Parameters page: data block type at byte 12.
+                    if (buffer.Length >= 13)
+                    {
+                        LastDataBlockType = buffer[12] & 0x0F;
+                    }
+
                     break;
                 }
 
@@ -767,6 +867,11 @@ public sealed class BurnSessionTests
                         throw new OpticalDriveException("CHECK CONDITION: ILLEGAL REQUEST (mock rejects CD-TEXT cue sheets).");
                     }
 
+                    if (RejectRawPwCueSheet && data.Length >= 8 && (data[3] & 0x40) != 0 && LastDataBlockType == 3)
+                    {
+                        throw new OpticalDriveException("CHECK CONDITION: ILLEGAL REQUEST (mock rejects CD-TEXT cue sheets in 2448-byte mode).");
+                    }
+
                     break;
                 }
 
@@ -782,6 +887,18 @@ public sealed class BurnSessionTests
                     }
                     else
                     {
+                        ProgramWriteCount++;
+
+                        if (FailProgramWriteNumber is int failAt && ProgramWriteCount == failAt)
+                        {
+                            throw new OpticalDriveException("CHECK CONDITION: simulated program write failure.");
+                        }
+
+                        if (RejectRawPwProgramWrites && LastDataBlockType == 3)
+                        {
+                            throw new OpticalDriveException("CHECK CONDITION: mock rejects 2448-byte program writes.");
+                        }
+
                         if (LeadInBytesWritten == 0 && NwaQueried && ProgramSectorsWritten == 0)
                         {
                             LeadInWrittenBeforeProgram = false;
@@ -794,19 +911,24 @@ public sealed class BurnSessionTests
                             throw new InvalidOperationException($"Non-contiguous WRITE: expected LBA {expected}, got {lba}.");
                         }
 
-                        // Capture bytes destined for LBAs below 0 (pregap region).
+                        // Capture the audio bytes destined for LBAs below 0
+                        // (pregap region); in 2448-byte mode each sector's
+                        // trailing 96 sub-channel bytes are skipped.
+                        int stride = LastDataBlockType == 3 ? 2448 : 2352;
+
                         for (int i = 0; i < count; i++)
                         {
                             if (lba + i < 0)
                             {
                                 for (int b = 0; b < 2352; b++)
                                 {
-                                    PregapBytes.Add(buffer[i * 2352 + b]);
+                                    PregapBytes.Add(buffer[i * stride + b]);
                                 }
                             }
                         }
 
                         ProgramSectorsWritten += count;
+                        ProgramBytesWritten += buffer.Length;
                         NextExpectedProgramLba = lba + count;
                     }
 

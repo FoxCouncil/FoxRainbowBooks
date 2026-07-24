@@ -20,6 +20,7 @@ public sealed class FileBackedBurnTransport : IScsiTransport
     private readonly List<CueSheetEntry> _cueEntries = new();
     private readonly MemoryStream _cdTextLeadIn = new();
     private bool _cdTextCueRequested;
+    private int _programSectorBytes = CdConstants.SectorSize;
     private bool _closed;
     private bool _disposed;
 
@@ -98,9 +99,14 @@ public sealed class FileBackedBurnTransport : IScsiTransport
             }
 
             case BurnCommands.OpSendOpc:
+            {
+                // Accept silently — no hardware to calibrate.
+                break;
+            }
+
             case BurnCommands.OpModeSelect10:
             {
-                // Accept silently — no hardware to calibrate or configure.
+                HandleModeSelect(buffer);
                 break;
             }
 
@@ -227,6 +233,25 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         }
     }
 
+    /// <summary>
+    /// Tracks the Data Block Type from the Write Parameters page: block
+    /// type 3 means program-area transfers carry 2,448 bytes per sector
+    /// (2,352 audio + 96 raw P-W sub-channel), as a real drive would
+    /// expect in CD-TEXT mode.
+    /// </summary>
+    private void HandleModeSelect(ReadOnlySpan<byte> data)
+    {
+        // 8-byte mode parameter header, page code at byte 8, page body at
+        // byte 10; Data Block Type is page body byte 2 (= byte 12).
+        if (data.Length >= 13 && (data[8] & 0x3F) == BurnCommands.WriteParametersPageCode)
+        {
+            int blockType = data[12] & 0x0F;
+            _programSectorBytes = blockType == BurnCommands.DataBlockTypeRawPw
+                ? CdConstants.SectorSize + CdConstants.SubchannelSize
+                : CdConstants.SectorSize;
+        }
+    }
+
     private void HandleWrite(ReadOnlySpan<byte> cdb, ReadOnlySpan<byte> data)
     {
         int lba = unchecked((int)BinaryPrimitives.ReadUInt32BigEndian(cdb.Slice(2, 4)));
@@ -241,10 +266,17 @@ public sealed class FileBackedBurnTransport : IScsiTransport
 
         // Program area writes start at LBA -150 (track 1's pregap), which
         // maps to file offset 0 so the .bin models the full program area.
+        // In raw P-W mode only the 2,352 audio bytes of each 2,448-byte
+        // sector land in the .bin — the file stays a playable bin/cue.
         _binStream ??= new FileStream(_binPath, FileMode.Create, FileAccess.Write);
-        long offset64 = (lba + 150L) * CdConstants.SectorSize;
-        _binStream.Seek(offset64, SeekOrigin.Begin);
-        _binStream.Write(data);
+        int sectors = data.Length / _programSectorBytes;
+
+        for (int i = 0; i < sectors; i++)
+        {
+            long offset64 = (lba + 150L + i) * CdConstants.SectorSize;
+            _binStream.Seek(offset64, SeekOrigin.Begin);
+            _binStream.Write(data.Slice(i * _programSectorBytes, CdConstants.SectorSize));
+        }
     }
 
     private void HandleClose()
