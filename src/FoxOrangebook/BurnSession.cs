@@ -20,7 +20,7 @@ namespace FoxOrangebook;
 ///   <item>Stream CD-TEXT packs into the lead-in when metadata is present.</item>
 ///   <item>Stream all program sectors via WRITE (10), starting at LBA -150
 ///   with track 1's pregap silence.</item>
-///   <item>Close the session to finalize the disc.</item>
+///   <item>Flush the drive's cache and wait — in SAO the drive finalizes the session itself.</item>
 /// </list>
 /// </para>
 /// <para>
@@ -230,7 +230,7 @@ public sealed class BurnSession
 
         await WriteProgramAreaAsync(tracks, progress, cancellationToken).ConfigureAwait(false);
 
-        CloseSession();
+        FinalizeSession();
     }
 
     /// <summary>
@@ -275,7 +275,7 @@ public sealed class BurnSession
             return false;
         }
 
-        CloseSession();
+        FinalizeSession();
         return true;
     }
 
@@ -555,13 +555,15 @@ public sealed class BurnSession
         _transport.Execute(cdb, data, ScsiDirection.Out);
     }
 
-    private void CloseSession()
+    private void FinalizeSession()
     {
-        // The drive may still be flushing its write buffer after the last
-        // program WRITE — a blocking CLOSE at that moment fails with
-        // NOT READY 02/04/07 (observed on the Pioneer BDR-XS07U). Same
-        // sequence as DataBurnSession's finalize: flush the cache, wait
-        // until ready, close as a background operation, wait again.
+        // In Session-At-Once the drive closes the session itself once the
+        // host has written the full program area described by the cue
+        // sheet — an explicit CLOSE TRACK/SESSION is not part of the SAO
+        // flow (cdrecord/cdrdao send none), and the Pioneer BDR-XS07U
+        // rejects one with 5/30/05 once the disc is already finalized.
+        // Flushing the cache and waiting for ready IS the SAO finalize.
+        // (TAO data burns differ: DataBurnSession keeps its CLOSE.)
         byte[] cdb = new byte[10];
         BurnCommands.BuildSynchronizeCache(cdb);
 
@@ -576,19 +578,19 @@ public sealed class BurnSession
 
         BurnCommands.WaitWhileNotReady(_transport);
 
-        cdb = new byte[10];
-        BurnCommands.BuildCloseSession(cdb, immediate: true);
+        // Belt and braces: confirm the drive actually finalized the disc.
+        var discInfo = ReadDiscInfo();
 
-        try
+        if (discInfo.Status != DiscStatus.Complete)
         {
-            _transport.Execute(cdb, Span<byte>.Empty, ScsiDirection.None);
-        }
-        catch (DriveNotReadyException)
-        {
-            // Close accepted as a background operation.
-        }
+            BurnCommands.WaitWhileNotReady(_transport);
+            discInfo = ReadDiscInfo();
 
-        BurnCommands.WaitWhileNotReady(_transport);
+            if (discInfo.Status != DiscStatus.Complete)
+            {
+                throw new InvalidOperationException($"Drive did not finalize the disc after the DAO burn (status: {discInfo.Status}).");
+            }
+        }
     }
 
     // ── Cue sheet builder ────────────────────────────────────

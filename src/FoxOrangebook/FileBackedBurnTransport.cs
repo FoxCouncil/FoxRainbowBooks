@@ -122,8 +122,12 @@ public sealed class FileBackedBurnTransport : IScsiTransport
                 break;
             }
 
+            case BurnCommands.OpSynchronizeCache:
             case BurnCommands.OpCloseTrackSession:
             {
+                // SAO audio burns finalize via SYNCHRONIZE CACHE (the
+                // drive closes the session itself); an explicit CLOSE is
+                // honored too for other callers.
                 HandleClose();
                 break;
             }
@@ -171,12 +175,15 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         }
     }
 
-    private static void HandleReadDiscInformation(Span<byte> buffer)
+    private void HandleReadDiscInformation(Span<byte> buffer)
     {
         if (buffer.Length >= 34)
         {
             buffer.Clear();
-            buffer[2] = 0x00; // Blank disc
+
+            // Blank until finalized; Complete afterward, like a real SAO
+            // drive that closed the session itself.
+            buffer[2] = _closed ? (byte)0x02 : (byte)0x00;
 
             // Last Possible Lead-Out Start Address: model an 80-minute
             // blank (79:59:74 ≈ 359,849 program sectors).

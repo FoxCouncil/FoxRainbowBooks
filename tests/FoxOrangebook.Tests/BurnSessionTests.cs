@@ -250,7 +250,7 @@ public sealed class BurnSessionTests
 
         await session.BurnAsync(tracks);
 
-        Assert.True(transport.SessionClosed);
+        Assert.True(transport.CacheSynchronized);
     }
 
     [Fact]
@@ -305,17 +305,14 @@ public sealed class BurnSessionTests
 
         // 150 pregap silence sectors + 400 audio sectors.
         Assert.Equal(150 + sectorCount, transport.ProgramSectorsWritten);
-        Assert.True(transport.SessionClosed);
         Assert.True(transport.OpcPerformed);
         Assert.True(transport.WriteParametersSet);
         Assert.Single(transport.CueSheets);
 
-        // Finalize: cache flushed before the close, close sent with IMMED
-        // so the drive finishes in the background while we poll ready.
-        Assert.True(transport.CacheSynchronizedBeforeClose);
-        Assert.NotNull(transport.LastCloseCdb);
-        Assert.Equal(0x01, transport.LastCloseCdb![1]); // IMMED
-        Assert.Equal(0x02, transport.LastCloseCdb[2]);  // close session
+        // SAO finalize: flush the cache and wait — the drive closes the
+        // session itself, so no CLOSE TRACK/SESSION goes out.
+        Assert.True(transport.CacheSynchronized);
+        Assert.False(transport.CloseCommandSent);
     }
 
     [Fact]
@@ -509,7 +506,7 @@ public sealed class BurnSessionTests
         Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[0][3]); // plain lead-in, not 0x41
         Assert.Equal(0, transport.LeadInBytesWritten);
         Assert.Equal(550, transport.ProgramSectorsWritten);
-        Assert.True(transport.SessionClosed);
+        Assert.True(transport.CacheSynchronized);
         Assert.Single(session.Warnings);
         Assert.Contains("CD-TEXT", session.Warnings[0], StringComparison.Ordinal);
     }
@@ -533,7 +530,7 @@ public sealed class BurnSessionTests
         Assert.Equal(CueSheetEntry.DataFormGenerated, transport.CueSheets[1][3]);
 
         Assert.Equal(0, transport.LeadInBytesWritten);
-        Assert.True(transport.SessionClosed);
+        Assert.True(transport.CacheSynchronized);
         Assert.Equal(550, transport.ProgramSectorsWritten);
         Assert.Single(session.Warnings);
         Assert.Contains("CD-TEXT", session.Warnings[0], StringComparison.Ordinal);
@@ -561,7 +558,7 @@ public sealed class BurnSessionTests
         Assert.Equal(40 * 96, transport.LeadInBytesWritten);
         Assert.Equal(550, transport.ProgramSectorsWritten);
         Assert.Equal(-150, transport.FirstProgramWriteLba);
-        Assert.True(transport.SessionClosed);
+        Assert.True(transport.CacheSynchronized);
         Assert.Single(session.Warnings);
     }
 
@@ -581,7 +578,7 @@ public sealed class BurnSessionTests
         await Assert.ThrowsAsync<OpticalDriveException>(() => session.BurnAsync(tracks));
 
         Assert.Single(transport.CueSheets);
-        Assert.False(transport.SessionClosed);
+        Assert.False(transport.CacheSynchronized);
     }
 
     public static TheoryData<OpticalDriveException> TransientCueSheetFailures => new()
@@ -612,7 +609,7 @@ public sealed class BurnSessionTests
         Assert.Same(failure, thrown);
         Assert.Single(transport.CueSheets); // no plain-sheet retry
         Assert.Empty(session.Warnings);
-        Assert.False(transport.SessionClosed);
+        Assert.False(transport.CacheSynchronized);
     }
 
     [Fact]
@@ -800,9 +797,7 @@ public sealed class BurnSessionTests
         public bool NwaQueried { get; private set; }
         public List<byte[]> CueSheets { get; } = new();
         public bool CacheSynchronized { get; private set; }
-        public bool CacheSynchronizedBeforeClose { get; private set; }
-        public byte[]? LastCloseCdb { get; private set; }
-        public bool SessionClosed { get; private set; }
+        public bool CloseCommandSent { get; private set; }
         public bool OpcPerformed { get; private set; }
         public bool WriteParametersSet { get; private set; }
         public byte[]? LastStartStopCdb { get; private set; }
@@ -840,7 +835,10 @@ public sealed class BurnSessionTests
                 {
                     if (direction == ScsiDirection.In && buffer.Length >= 34)
                     {
-                        buffer[2] = DiscIsBlank ? (byte)0x00 : (byte)0x02;
+                        // Blank until the program area has been written —
+                        // the SAO drive then finalizes the disc itself.
+                        bool complete = !DiscIsBlank || ProgramSectorsWritten > 0;
+                        buffer[2] = complete ? (byte)0x02 : (byte)0x00;
                         buffer[21] = 0xFF;
                         buffer[22] = 0xFF;
                         buffer[23] = 0xFF;
@@ -990,9 +988,10 @@ public sealed class BurnSessionTests
 
                 case BurnCommands.OpCloseTrackSession:
                 {
-                    CacheSynchronizedBeforeClose = CacheSynchronized;
-                    LastCloseCdb = cdb.ToArray();
-                    SessionClosed = true;
+                    // SAO audio burns must never send this — the drive
+                    // finalizes the session itself and rejects an explicit
+                    // CLOSE with 5/30/05 once the disc is complete.
+                    CloseCommandSent = true;
                     break;
                 }
 
