@@ -172,36 +172,21 @@ public sealed class BurnCommandsTests
     public void BuildWriteParametersPage_DaoAudio_CorrectValues()
     {
         byte[] buffer = new byte[60];
-        int len = BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: false, cdText: false);
+        int len = BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: false);
 
         Assert.Equal(60, len);
         Assert.Equal(0x05, buffer[8]);  // page code
         Assert.Equal(0x32, buffer[9]);  // page length
         Assert.Equal(0x02, buffer[10]); // write type = DAO
         Assert.Equal(0x00, buffer[11]); // track mode = audio
-        Assert.Equal(0x00, buffer[12]); // data block type = raw 2352
-    }
-
-    [Fact]
-    public void BuildWriteParametersPage_CdText_SetsRawPwDataBlockType()
-    {
-        // CD-TEXT rides in the R-W sub-channel, which only exists with
-        // Data Block Type 3 (raw + raw P-W, 2448 bytes/sector). Mirrors
-        // cdrdao's setWriteParameters (mp[4] |= 3).
-        byte[] buffer = new byte[60];
-        BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: false, cdText: true);
-
-        Assert.Equal(0x03, buffer[12]); // data block type = raw 2448 with raw P-W sub-channel
-        Assert.Equal(0x02, buffer[10]); // write type stays DAO
-        Assert.Equal(0x00, buffer[11]); // track mode stays audio
-        Assert.Equal(0x00, buffer[22]); // session format stays CD-DA
+        Assert.Equal(0x00, buffer[12]); // data block type = raw 2352, also for CD-TEXT burns (hardware-validated)
     }
 
     [Fact]
     public void BuildWriteParametersPage_TestWrite_SetsBit()
     {
         byte[] buffer = new byte[60];
-        BurnCommands.BuildWriteParametersPage(buffer, testWrite: true, bufferUnderrunProtection: false, cdText: false);
+        BurnCommands.BuildWriteParametersPage(buffer, testWrite: true, bufferUnderrunProtection: false);
 
         Assert.Equal(0x12, buffer[10]); // DAO (0x02) | test write (0x10)
     }
@@ -210,7 +195,7 @@ public sealed class BurnCommandsTests
     public void BuildWriteParametersPage_Bufe_SetsBit()
     {
         byte[] buffer = new byte[60];
-        BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: true, cdText: false);
+        BurnCommands.BuildWriteParametersPage(buffer, testWrite: false, bufferUnderrunProtection: true);
 
         Assert.Equal(0x42, buffer[10]); // DAO (0x02) | BUFE (0x40)
     }
@@ -458,6 +443,61 @@ public sealed class BurnCommandsTests
     public void ParseNextWritableAddress_ResponseTooShort_ReturnsNull()
     {
         Assert.Null(BurnCommands.ParseNextWritableAddress(new byte[8]));
+    }
+
+    // ── READ TOC/PMA/ATIP (ATIP format) ──────────────────────
+
+    [Fact]
+    public void BuildReadAtip_ExactByteLayout()
+    {
+        Span<byte> cdb = stackalloc byte[10];
+        BurnCommands.BuildReadAtip(cdb, 32);
+
+        Assert.Equal(0x43, cdb[0]);
+        Assert.Equal(0x04, cdb[2]); // format 0100b = ATIP
+        Assert.Equal(0x00, cdb[7]);
+        Assert.Equal(0x20, cdb[8]); // allocation = 32
+    }
+
+    [Fact]
+    public void ParseAtipLeadInStart_PioneerHardwareOracle()
+    {
+        // The Pioneer BDR-XS07U reports lead-in start 97:34:23 on CD-RW:
+        // ((97*60)+34)*75 + 23 - 450150 = -11,077 (probe-verified).
+        byte[] response = new byte[32];
+        response[8] = 97;
+        response[9] = 34;
+        response[10] = 23;
+
+        Assert.Equal(-11077, BurnCommands.ParseAtipLeadInStart(response));
+    }
+
+    [Fact]
+    public void ParseAtipLeadInStart_ZeroedResponse_ReturnsNull()
+    {
+        // A zeroed buffer must not decode to LBA -450,150 and send the
+        // burn off to write 450,000 lead-in sectors.
+        Assert.Null(BurnCommands.ParseAtipLeadInStart(new byte[32]));
+    }
+
+    [Theory]
+    [InlineData(50, 0, 0)]   // minute below the ATIP lead-in wrap range
+    [InlineData(97, 60, 0)]  // invalid seconds
+    [InlineData(97, 34, 75)] // invalid frame
+    public void ParseAtipLeadInStart_ImplausibleMsf_ReturnsNull(byte min, byte sec, byte frame)
+    {
+        byte[] response = new byte[32];
+        response[8] = min;
+        response[9] = sec;
+        response[10] = frame;
+
+        Assert.Null(BurnCommands.ParseAtipLeadInStart(response));
+    }
+
+    [Fact]
+    public void ParseAtipLeadInStart_ResponseTooShort_ReturnsNull()
+    {
+        Assert.Null(BurnCommands.ParseAtipLeadInStart(new byte[8]));
     }
 
     // ── MSF conversion ───────────────────────────────────────

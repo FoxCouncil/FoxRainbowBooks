@@ -19,8 +19,6 @@ public sealed class FileBackedBurnTransport : IScsiTransport
     private FileStream? _binStream;
     private readonly List<CueSheetEntry> _cueEntries = new();
     private readonly MemoryStream _cdTextLeadIn = new();
-    private bool _cdTextCueRequested;
-    private int _programSectorBytes = CdConstants.SectorSize;
     private bool _closed;
     private bool _disposed;
 
@@ -49,10 +47,11 @@ public sealed class FileBackedBurnTransport : IScsiTransport
 
     /// <summary>
     /// Size of the simulated CD-TEXT lead-in region in 96-byte sectors.
-    /// When a cue sheet requests CD-TEXT in the lead-in, the transport
-    /// reports a Next Writable Address of -150 minus this value. Real
-    /// media lead-ins run to thousands of sectors; the default keeps
-    /// simulated output small.
+    /// Modeled like the Pioneer BDR-XS07U: READ TRACK INFORMATION reports
+    /// NWA -150 (the pregap, useless for lead-in writes) and the ATIP
+    /// reports a start-of-lead-in of -150 minus this value. Real media
+    /// lead-ins run to ~11,000 sectors; the default keeps simulated
+    /// output small.
     /// </summary>
     public int CdTextLeadInSectors { get; init; } = 75;
 
@@ -99,14 +98,15 @@ public sealed class FileBackedBurnTransport : IScsiTransport
             }
 
             case BurnCommands.OpSendOpc:
+            case BurnCommands.OpModeSelect10:
             {
-                // Accept silently — no hardware to calibrate.
+                // Accept silently — no hardware to calibrate or configure.
                 break;
             }
 
-            case BurnCommands.OpModeSelect10:
+            case BurnCommands.OpReadTocPmaAtip:
             {
-                HandleModeSelect(buffer);
+                HandleReadTocPmaAtip(cdb, buffer);
                 break;
             }
 
@@ -186,25 +186,45 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         }
     }
 
-    private void HandleReadTrackInformation(Span<byte> buffer)
+    private static void HandleReadTrackInformation(Span<byte> buffer)
     {
         if (buffer.Length >= 16)
         {
             buffer.Clear();
             buffer[7] = 0x01; // NWA valid
 
-            // With CD-TEXT in the cue sheet, the next writable address is
-            // the start of the simulated lead-in; otherwise the program
-            // area begins directly at track 1's pregap.
-            int nwa = _cdTextCueRequested ? -150 - CdTextLeadInSectors : -150;
-            BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(12, 4), unchecked((uint)nwa));
+            // Like the Pioneer BDR-XS07U, the NWA (even for the invisible
+            // track) is -150 — the pregap start, never the lead-in. The
+            // lead-in address comes from the ATIP instead.
+            BinaryPrimitives.WriteUInt32BigEndian(buffer.Slice(12, 4), unchecked((uint)-150));
         }
+    }
+
+    /// <summary>
+    /// Answers READ TOC/PMA/ATIP format 4 (ATIP) with a start-of-lead-in
+    /// of -150 minus <see cref="CdTextLeadInSectors"/>, expressed as MSF
+    /// in the high-minute wrap range (lba + 450,150). Other formats are
+    /// ignored.
+    /// </summary>
+    private void HandleReadTocPmaAtip(ReadOnlySpan<byte> cdb, Span<byte> buffer)
+    {
+        if ((cdb[2] & 0x0F) != 0x04 || buffer.Length < 11)
+        {
+            return;
+        }
+
+        buffer.Clear();
+        buffer[1] = (byte)(buffer.Length - 2); // ATIP data length
+
+        int leadInFrames = 450150 + (-150 - CdTextLeadInSectors);
+        buffer[8] = (byte)(leadInFrames / (60 * 75));       // min
+        buffer[9] = (byte)(leadInFrames / 75 % 60);         // sec
+        buffer[10] = (byte)(leadInFrames % 75);             // frame
     }
 
     private void HandleSendCueSheet(ReadOnlySpan<byte> data)
     {
         _cueEntries.Clear();
-        _cdTextCueRequested = false;
 
         int entryCount = data.Length / BurnCommands.CueSheetEntrySize;
 
@@ -212,7 +232,7 @@ public sealed class FileBackedBurnTransport : IScsiTransport
         {
             int offset = i * BurnCommands.CueSheetEntrySize;
 
-            var entry = new CueSheetEntry
+            _cueEntries.Add(new CueSheetEntry
             {
                 CtlAdr = data[offset],
                 TrackNumber = data[offset + 1],
@@ -222,33 +242,7 @@ public sealed class FileBackedBurnTransport : IScsiTransport
                 Minute = data[offset + 5],
                 Second = data[offset + 6],
                 Frame = data[offset + 7],
-            };
-
-            if (entry.TrackNumber == CueSheetEntry.LeadInTrack && (entry.DataForm & 0x40) != 0)
-            {
-                _cdTextCueRequested = true;
-            }
-
-            _cueEntries.Add(entry);
-        }
-    }
-
-    /// <summary>
-    /// Tracks the Data Block Type from the Write Parameters page: block
-    /// type 3 means program-area transfers carry 2,448 bytes per sector
-    /// (2,352 audio + 96 raw P-W sub-channel), as a real drive would
-    /// expect in CD-TEXT mode.
-    /// </summary>
-    private void HandleModeSelect(ReadOnlySpan<byte> data)
-    {
-        // 8-byte mode parameter header, page code at byte 8, page body at
-        // byte 10; Data Block Type is page body byte 2 (= byte 12).
-        if (data.Length >= 13 && (data[8] & 0x3F) == BurnCommands.WriteParametersPageCode)
-        {
-            int blockType = data[12] & 0x0F;
-            _programSectorBytes = blockType == BurnCommands.DataBlockTypeRawPw
-                ? CdConstants.SectorSize + CdConstants.SubchannelSize
-                : CdConstants.SectorSize;
+            });
         }
     }
 
@@ -266,17 +260,10 @@ public sealed class FileBackedBurnTransport : IScsiTransport
 
         // Program area writes start at LBA -150 (track 1's pregap), which
         // maps to file offset 0 so the .bin models the full program area.
-        // In raw P-W mode only the 2,352 audio bytes of each 2,448-byte
-        // sector land in the .bin — the file stays a playable bin/cue.
         _binStream ??= new FileStream(_binPath, FileMode.Create, FileAccess.Write);
-        int sectors = data.Length / _programSectorBytes;
-
-        for (int i = 0; i < sectors; i++)
-        {
-            long offset64 = (lba + 150L + i) * CdConstants.SectorSize;
-            _binStream.Seek(offset64, SeekOrigin.Begin);
-            _binStream.Write(data.Slice(i * _programSectorBytes, CdConstants.SectorSize));
-        }
+        long offset64 = (lba + 150L) * CdConstants.SectorSize;
+        _binStream.Seek(offset64, SeekOrigin.Begin);
+        _binStream.Write(data);
     }
 
     private void HandleClose()

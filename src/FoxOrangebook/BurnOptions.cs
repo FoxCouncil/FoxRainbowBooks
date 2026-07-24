@@ -24,10 +24,9 @@ public sealed record BurnOptions
     /// <summary>
     /// Number of sectors to send per WRITE (10) command. Larger values
     /// reduce command overhead but require more memory. 32 sectors =
-    /// 75,264 bytes per command — a good balance. Note that CD-TEXT burns
-    /// use 2,448-byte sectors (audio + raw P-W sub-channel); on transports
-    /// with a 64 KB transfer cap (typical USB), keep this at 26 or below
-    /// (26 × 2,448 = 63,648 bytes).
+    /// 75,264 bytes per command — a good balance. On transports with a
+    /// 64 KB transfer cap (typical USB), keep this at 27 or below
+    /// (27 × 2,352 = 63,504 bytes).
     /// </summary>
     public int SectorsPerWrite { get; init; } = 32;
 
