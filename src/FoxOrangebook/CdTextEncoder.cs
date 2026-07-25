@@ -23,9 +23,11 @@ namespace FoxOrangebook;
 /// against libcdio's reference data.
 /// </para>
 /// <para>
-/// Only single-byte ISO 8859-1 encoding is produced; characters outside
-/// Latin-1 are replaced with '?'. MS-JIS (Shift-JIS) double-byte packs
-/// are future work.
+/// Only single-byte ISO 8859-1 encoding is produced. Common typographic
+/// punctuation that Latin-1 cannot carry (curly quotes, dashes, ellipsis)
+/// is transliterated to ASCII equivalents first; anything still
+/// unrepresentable is replaced with '?' and a warning is recorded.
+/// MS-JIS (Shift-JIS) double-byte packs are future work.
 /// </para>
 /// </remarks>
 internal static class CdTextEncoder
@@ -87,15 +89,17 @@ internal static class CdTextEncoder
         var packs = new List<byte[]>();
         int[] packCountsByType = new int[16];
 
+        bool replacedWithQuestionMark = false;
+
         if (anyTitle)
         {
-            int added = AppendTextPacks(packs, PackTitle, BuildStrings(albumTitle, trackTitles));
+            int added = AppendTextPacks(packs, PackTitle, PrepareStrings(albumTitle, trackTitles, ref replacedWithQuestionMark));
             packCountsByType[PackTitle - 0x80] = added;
         }
 
         if (anyPerformer)
         {
-            int added = AppendTextPacks(packs, PackPerformer, BuildStrings(albumPerformer, trackPerformers));
+            int added = AppendTextPacks(packs, PackPerformer, PrepareStrings(albumPerformer, trackPerformers, ref replacedWithQuestionMark));
             packCountsByType[PackPerformer - 0x80] = added;
         }
 
@@ -103,6 +107,11 @@ internal static class CdTextEncoder
         {
             warnings?.Add($"CD-TEXT needs {packs.Count + SizeInfoPackCount} packs but a block holds at most {MaxPacksPerBlock}; CD-TEXT was dropped. Shorten titles/performers.");
             return null;
+        }
+
+        if (replacedWithQuestionMark)
+        {
+            warnings?.Add("Some CD-TEXT characters are not representable in ISO 8859-1 and were replaced with '?'.");
         }
 
         packCountsByType[PackBlockSize - 0x80] = SizeInfoPackCount;
@@ -176,6 +185,85 @@ internal static class CdTextEncoder
         return (ushort)(crc ^ 0xFFFF);
     }
 
+    /// <summary>
+    /// Replaces common typographic punctuation that ISO 8859-1 cannot
+    /// carry with ASCII equivalents, so curly apostrophes and dashes in
+    /// real music metadata survive instead of becoming '?'. Everything
+    /// Latin-1 CAN carry — accented letters (é, ü, ñ), guillemets («, »)
+    /// — passes through unchanged. Must run before pack budgeting: '…'
+    /// expands to three characters.
+    /// </summary>
+    internal static string TransliterateToLatin1(string text)
+    {
+        bool needsWork = false;
+
+        foreach (char c in text)
+        {
+            if (c > '\u00FF' || c == '\u00A0')
+            {
+                needsWork = true;
+                break;
+            }
+        }
+
+        if (!needsWork)
+        {
+            return text;
+        }
+
+        var sb = new StringBuilder(text.Length + 8);
+
+        foreach (char c in text)
+        {
+            switch (c)
+            {
+                case '‘' or '’' or '‚' or '‛': // ‘ ’ ‚ ‛
+                {
+                    sb.Append('\'');
+                }
+                break;
+
+                case '“' or '”' or '„' or '‟': // “ ” „ ‟
+                {
+                    sb.Append('"');
+                }
+                break;
+
+                case '–' or '—' or '―' or '−': // – — ― −
+                {
+                    sb.Append('-');
+                }
+                break;
+
+                case '…': // …
+                {
+                    sb.Append("...");
+                }
+                break;
+
+                case '\u00A0' or '\u2007' or '\u202F': // no-break / figure / narrow no-break space
+                {
+                    sb.Append(' ');
+                }
+                break;
+
+                case '•': // •
+                {
+                    sb.Append('*');
+                }
+                break;
+
+                default:
+                {
+                    sb.Append(c);
+                }
+                break;
+            }
+        }
+
+        return sb.ToString();
+    }
+
     // ── Pack building ────────────────────────────────────────
 
     private static string[] BuildStrings(string? albumValue, IReadOnlyList<string?> trackValues)
@@ -186,6 +274,32 @@ internal static class CdTextEncoder
         for (int i = 0; i < trackValues.Count; i++)
         {
             strings[i + 1] = trackValues[i] ?? string.Empty;
+        }
+
+        return strings;
+    }
+
+    /// <summary>
+    /// Builds the per-track string array (element 0 = disc level) with
+    /// typographic punctuation transliterated, flagging whether any
+    /// character remains outside ISO 8859-1 and will become '?'.
+    /// </summary>
+    private static string[] PrepareStrings(string? albumValue, IReadOnlyList<string?> trackValues, ref bool replacedWithQuestionMark)
+    {
+        string[] strings = BuildStrings(albumValue, trackValues);
+
+        for (int i = 0; i < strings.Length; i++)
+        {
+            strings[i] = TransliterateToLatin1(strings[i]);
+
+            foreach (char c in strings[i])
+            {
+                if (c > '\u00FF')
+                {
+                    replacedWithQuestionMark = true;
+                    break;
+                }
+            }
         }
 
         return strings;

@@ -202,12 +202,113 @@ public sealed class CdTextEncoderTests
         Assert.Equal(0x01, packs[18 + 1]); // pack 1's first byte is inside track 1's title
     }
 
+    // ── Transliteration ──────────────────────────────────────
+
+    [Theory]
+    [InlineData("Frankie’s First Affair", "Frankie's First Affair")]
+    [InlineData("Burn Test 1 — Smoke", "Burn Test 1 - Smoke")]
+    [InlineData("‘quoted’ “speech”", "'quoted' \"speech\"")]
+    [InlineData("low ‚quote„ high ‛‟", "low 'quote\" high '\"")]
+    [InlineData("1–2 A—B bar―line 3−4", "1-2 A-B bar-line 3-4")]
+    [InlineData("To be continued…", "To be continued...")]
+    [InlineData("• Item", "* Item")]
+    public void TransliterateToLatin1_TypographicPunctuation_BecomesAscii(string input, string expected)
+    {
+        Assert.Equal(expected, CdTextEncoder.TransliterateToLatin1(input));
+    }
+
+    [Fact]
+    public void TransliterateToLatin1_NoBreakSpaces_BecomePlainSpace()
+    {
+        // U+00A0 no-break, U+2007 figure, U+202F narrow no-break space,
+        // built from char casts so the invisible characters are explicit.
+        string input = "A" + (char)0x00A0 + "B" + (char)0x2007 + "C" + (char)0x202F + "D";
+
+        Assert.Equal("A B C D", CdTextEncoder.TransliterateToLatin1(input));
+    }
+    [Theory]
+    [InlineData("Café Über Señor Ångström")]
+    [InlineData("«Guillemets» stay")]
+    [InlineData("Plain ASCII 123!")]
+    public void TransliterateToLatin1_RepresentableText_PassesThroughUnchanged(string input)
+    {
+        Assert.Same(input, CdTextEncoder.TransliterateToLatin1(input));
+    }
+
+    [Fact]
+    public void GeneratePacks_CurlyApostrophe_RoundTripsAsAscii()
+    {
+        byte[]? packs = CdTextEncoder.GeneratePacks("Album", null, new string?[] { "Frankie’s First Affair" }, new string?[] { null });
+
+        Assert.NotNull(packs);
+
+        var parsed = CdTextTestHelpers.ParseWithFoxRedbook(packs!);
+
+        Assert.Equal("Frankie's First Affair", parsed!.Tracks[0].Title);
+    }
+
+    [Fact]
+    public void GeneratePacks_EmDashAndEllipsis_RoundTripAsAscii()
+    {
+        var warnings = new List<string>();
+        byte[]? packs = CdTextEncoder.GeneratePacks("Burn Test 1 — Smoke", null, new string?[] { "Wait…" }, new string?[] { null }, warnings);
+
+        Assert.NotNull(packs);
+
+        var parsed = CdTextTestHelpers.ParseWithFoxRedbook(packs!);
+
+        Assert.Equal("Burn Test 1 - Smoke", parsed!.AlbumTitle);
+        Assert.Equal("Wait...", parsed.Tracks[0].Title);
+
+        // Fully transliterated — nothing became '?', so no warning.
+        Assert.Empty(warnings);
+    }
+
+    [Fact]
+    public void GeneratePacks_AccentedLatin_RoundTripsByteIdentical()
+    {
+        var warnings = new List<string>();
+        byte[]? packs = CdTextEncoder.GeneratePacks("Café Åñü", null, new string?[] { "Señor Über" }, new string?[] { null }, warnings);
+
+        Assert.NotNull(packs);
+
+        var parsed = CdTextTestHelpers.ParseWithFoxRedbook(packs!);
+
+        Assert.Equal("Café Åñü", parsed!.AlbumTitle);
+        Assert.Equal("Señor Über", parsed.Tracks[0].Title);
+        Assert.Empty(warnings);
+    }
+
+    [Fact]
+    public void GeneratePacks_EllipsisExpansion_BudgetedBeforePackLimit()
+    {
+        // 99 track titles of 10 ellipses each look tiny (11 bytes per
+        // string) but expand to 31 bytes each — past the 256-pack block
+        // limit. The overflow must be detected AFTER expansion, or a
+        // title could overflow its packs on the disc.
+        var titles = new string?[99];
+        var performers = new string?[99];
+
+        for (int i = 0; i < 99; i++)
+        {
+            titles[i] = new string('…', 10);
+        }
+
+        var warnings = new List<string>();
+        byte[]? packs = CdTextEncoder.GeneratePacks(null, null, titles, performers, warnings);
+
+        Assert.Null(packs);
+        Assert.Single(warnings);
+        Assert.Contains("block holds at most", warnings[0], StringComparison.Ordinal);
+    }
+
     // ── Encoding ─────────────────────────────────────────────
 
     [Fact]
-    public void GeneratePacks_NonLatin1Characters_ReplacedWithQuestionMark()
+    public void GeneratePacks_NonLatin1Characters_ReplacedWithQuestionMarkAndWarns()
     {
-        byte[]? packs = CdTextEncoder.GeneratePacks("日本語", null, new string?[] { "Track" }, new string?[] { null });
+        var warnings = new List<string>();
+        byte[]? packs = CdTextEncoder.GeneratePacks("日本語", null, new string?[] { "Track" }, new string?[] { null }, warnings);
 
         Assert.NotNull(packs);
 
@@ -215,6 +316,9 @@ public sealed class CdTextEncoderTests
         Assert.Equal((byte)'?', packs![4]);
         Assert.Equal((byte)'?', packs[5]);
         Assert.Equal((byte)'?', packs[6]);
+
+        Assert.Single(warnings);
+        Assert.Contains("'?'", warnings[0], StringComparison.Ordinal);
     }
 
     [Fact]
